@@ -7,7 +7,7 @@ namespace Donut
 {
     OpenGLVertexBuffer::OpenGLVertexBuffer(const void* data, uint32_t size)
     {
-        glCreateBuffers(1, &m_RendererID);
+        glGenBuffers(1, &m_RendererID); // glCreateBuffers is 4.5 DSA; unavailable on macOS 4.1
         glBindBuffer(GL_ARRAY_BUFFER, m_RendererID);
         glBufferData(GL_ARRAY_BUFFER, size, data, GL_STATIC_DRAW);
     }

@@ -8,6 +8,11 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
+// NOTE: This file targets OpenGL 4.1 (the maximum macOS exposes). It uses the
+// classic bind-based texture API rather than 4.5 Direct State Access
+// (glCreateTextures / glTextureStorage2D / glTextureParameteri / glBindTextureUnit),
+// none of which exist on macOS.
+
 namespace Donut
 {
     OpenGLTexture2D::OpenGLTexture2D(uint32_t width, uint32_t height)
@@ -16,14 +21,14 @@ namespace Donut
         m_InternalFormat = GL_RGBA8;
         m_DataFormat     = GL_RGBA;
 
-        glCreateTextures(GL_TEXTURE_2D,  1, &m_RendererID);
-        glTextureStorage2D(m_RendererID, 1, m_InternalFormat, m_Width, m_Height);
+        glGenTextures(1, &m_RendererID);
+        glBindTexture(GL_TEXTURE_2D, m_RendererID);
+        glTexImage2D(GL_TEXTURE_2D, 0, m_InternalFormat, m_Width, m_Height, 0, m_DataFormat, GL_UNSIGNED_BYTE, nullptr);
 
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
     }
 
     OpenGLTexture2D::OpenGLTexture2D(const std::string& path)
@@ -34,17 +39,17 @@ namespace Donut
         m_InternalFormat = GL_RGBA8;
         m_DataFormat     = GL_RGBA;
 
-        glCreateTextures(GL_TEXTURE_2D,  1, &m_RendererID);
-        glTextureStorage2D(m_RendererID, 1, m_InternalFormat, m_Width, m_Height);
+        glGenTextures(1, &m_RendererID);
+        glBindTexture(GL_TEXTURE_2D, m_RendererID);
+        glTexImage2D(GL_TEXTURE_2D, 0, m_InternalFormat, m_Width, m_Height, 0, m_DataFormat, GL_UNSIGNED_BYTE, nullptr);
 
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_REPEAT);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
         uint32_t whitePixel = 0xFFFFFFFF;
-        glTextureSubImage2D(m_RendererID, 0, 0, 0, m_Width, m_Height, m_DataFormat, GL_UNSIGNED_BYTE, &whitePixel);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_Width, m_Height, m_DataFormat, GL_UNSIGNED_BYTE, &whitePixel);
 
         DONUT_INFO("Created default texture (stb_image not available for loading: ", path, ")");
     }
@@ -62,17 +67,23 @@ namespace Donut
             DONUT_ERROR("Data must be entire texture!");
             return;
         }
-        
-        glTextureSubImage2D(m_RendererID, 0, 0, 0, m_Width, m_Height, m_DataFormat, GL_UNSIGNED_BYTE, data);
+
+        glBindTexture(GL_TEXTURE_2D, m_RendererID);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, m_Width, m_Height, m_DataFormat, GL_UNSIGNED_BYTE, data);
     }
 
     void OpenGLTexture2D::Bind(uint32_t slot) const
     {
-        glBindTextureUnit(slot, m_RendererID);
+        glActiveTexture(GL_TEXTURE0 + slot);
+        glBindTexture(GL_TEXTURE_2D, m_RendererID);
     }
 
     void OpenGLTexture2D::BindAsImage(uint32_t slot, bool readOnly) const
     {
+        // Image load/store is OpenGL 4.2 and unavailable on macOS. Guard the
+        // function pointer so this degrades to a no-op instead of crashing.
+        if (glBindImageTexture == nullptr)
+            return;
         GLenum access = readOnly ? GL_READ_ONLY : GL_WRITE_ONLY;
         glBindImageTexture(slot, m_RendererID, 0, GL_FALSE, 0, access, m_InternalFormat);
     }
@@ -80,17 +91,19 @@ namespace Donut
     OpenGLCubemapTexture::OpenGLCubemapTexture(uint32_t width, uint32_t height)
         : m_Width(width), m_Height(height)
     {
-        m_InternalFormat = GL_RGB16F;
-        m_DataFormat     = GL_RGB;
+        m_InternalFormat = GL_RGBA16F;
+        m_DataFormat     = GL_RGBA;
 
-        glCreateTextures(GL_TEXTURE_CUBE_MAP, 1, &m_RendererID);
-        glTextureStorage2D(m_RendererID, 1, m_InternalFormat, m_Width, m_Height);
+        glGenTextures(1, &m_RendererID);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, m_RendererID);
+        for (uint32_t i = 0; i < 6; ++i)
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, m_InternalFormat, m_Width, m_Height, 0, m_DataFormat, GL_FLOAT, nullptr);
 
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
     }
 
     OpenGLCubemapTexture::OpenGLCubemapTexture(const std::string& path)
@@ -98,17 +111,19 @@ namespace Donut
     {
         m_Width          = 1024;
         m_Height         = 1024;
-        m_InternalFormat = GL_RGB16F;
-        m_DataFormat     = GL_RGB;
+        m_InternalFormat = GL_RGBA16F;
+        m_DataFormat     = GL_RGBA;
 
-        glCreateTextures(GL_TEXTURE_CUBE_MAP, 1, &m_RendererID);
-        glTextureStorage2D(m_RendererID, 1, m_InternalFormat, m_Width, m_Height);
+        glGenTextures(1, &m_RendererID);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, m_RendererID);
+        for (uint32_t i = 0; i < 6; ++i)
+            glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, m_InternalFormat, m_Width, m_Height, 0, m_DataFormat, GL_FLOAT, nullptr);
 
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-        glTextureParameteri(m_RendererID, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
 
         LoadHDRI(path);
     }
@@ -123,11 +138,11 @@ namespace Donut
         stbi_set_flip_vertically_on_load(true);
         int width, height, channels;
         float* hdrData = stbi_loadf(path.c_str(), &width, &height, &channels, 3);
-        
+
         if (!hdrData)
         {
             DONUT_ERROR("Failed to load HDRI: {}", path);
-            float defaultSky[6 * 4] = 
+            float defaultSky[6 * 4] =
             {
                 0.5f, 0.7f, 1.0f, 1.0f,  // Right
                 0.5f, 0.7f, 1.0f, 1.0f,  // Left
@@ -136,15 +151,16 @@ namespace Donut
                 0.5f, 0.7f, 1.0f, 1.0f,  // Front
                 0.5f, 0.7f, 1.0f, 1.0f   // Back
             };
-            
+
+            glBindTexture(GL_TEXTURE_CUBE_MAP, m_RendererID);
             for (int i = 0; i < 6; ++i)
-                glTextureSubImage3D(m_RendererID, 0, 0, 0, i, 1, 1, 1, GL_RGBA, GL_FLOAT, &defaultSky[i * 4]);
+                glTexSubImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, &defaultSky[i * 4]);
             return;
         }
 
         ConvertEquirectangularToCubemap(hdrData, width, height);
         stbi_image_free(hdrData);
-        
+
         DONUT_INFO("Successfully loaded HDRI: {} ({}x{})", path, width, height);
     }
 
@@ -174,10 +190,10 @@ namespace Donut
             DONUT_ERROR("Failed to create equirectangular to cubemap shader");
             return;
         }
-        
+
         uint32_t shaderProgram = equirectShader->GetRendererID();
 
-        float vertices[] = 
+        float vertices[] =
         {
             -1.0f,  1.0f, -1.0f, -1.0f, -1.0f, -1.0f,  1.0f, -1.0f, -1.0f,  1.0f, -1.0f, -1.0f,  1.0f,  1.0f, -1.0f, -1.0f,  1.0f, -1.0f,
             -1.0f, -1.0f,  1.0f, -1.0f, -1.0f, -1.0f, -1.0f,  1.0f, -1.0f, -1.0f,  1.0f, -1.0f, -1.0f,  1.0f,  1.0f, -1.0f, -1.0f,  1.0f,
@@ -197,7 +213,7 @@ namespace Donut
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
 
         glm::mat4 captureProjection = glm::perspective(glm::radians(90.0f), 1.0f, 0.1f, 10.0f);
-        glm::mat4 captureViews[] = 
+        glm::mat4 captureViews[] =
         {
             glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3( 1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
             glm::lookAt(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(-1.0f,  0.0f,  0.0f), glm::vec3(0.0f, -1.0f,  0.0f)),
@@ -224,10 +240,10 @@ namespace Donut
             glDrawArrays(GL_TRIANGLES, 0, 36);
         }
         glBindVertexArray(0);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
         glDeleteVertexArrays(1, &cubeVAO);
         glDeleteBuffers(1, &cubeVBO);
-        glDeleteProgram(shaderProgram);
         glDeleteTextures(1, &hdrTexture);
         glDeleteFramebuffers(1, &captureFBO);
         glDeleteRenderbuffers(1, &captureRBO);
@@ -240,11 +256,14 @@ namespace Donut
 
     void OpenGLCubemapTexture::Bind(uint32_t slot) const
     {
-        glBindTextureUnit(slot, m_RendererID);
+        glActiveTexture(GL_TEXTURE0 + slot);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, m_RendererID);
     }
 
     void OpenGLCubemapTexture::BindAsImage(uint32_t slot, bool readOnly) const
     {
+        if (glBindImageTexture == nullptr)
+            return;
         GLenum access = readOnly ? GL_READ_ONLY : GL_WRITE_ONLY;
         glBindImageTexture(slot, m_RendererID, 0, GL_TRUE, 0, access, m_InternalFormat);
     }

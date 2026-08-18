@@ -303,7 +303,8 @@ project "Donut"
 
 	defines
 	{
-		"_CRT_SECURE_NO_WARNINGS"
+		"_CRT_SECURE_NO_WARNINGS",
+		"GLFW_INCLUDE_NONE"
 	}
 
 	files
@@ -351,14 +352,19 @@ project "Donut"
 
 	filter "system:windows"
 		systemversion "latest"
-        defines
-		{
-			"GLFW_INCLUDE_NONE"
-		}
-		
+
 		links
 		{
 			"opengl32.lib",
+		}
+
+	filter "system:macosx"
+		links
+		{
+			"Cocoa.framework",
+			"IOKit.framework",
+			"CoreFoundation.framework",
+			"QuartzCore.framework"
 		}
 
 	filter "configurations:Debug"

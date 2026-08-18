@@ -19,7 +19,9 @@ namespace Donut
 
         static void CreateTextures(bool multisampled, uint32_t* outID, uint32_t count)
         {
-            glCreateTextures(TextureTarget(multisampled), count, outID);
+            // glCreateTextures is 4.5 DSA; macOS caps at 4.1. Callers bind each
+            // texture (with the correct target) before use.
+            glGenTextures(count, outID);
         }
 
         static void AttachColorTexture(uint32_t id, int samples, GLenum internalFormat, GLenum format, uint32_t width, uint32_t height, int index)
@@ -31,7 +33,10 @@ namespace Donut
             }
             else
             {
-                glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, GL_UNSIGNED_BYTE, nullptr);
+                // Integer color formats require an integer pixel type even when
+                // data is null, or macOS's strict core profile rejects the call.
+                GLenum type = (format == GL_RED_INTEGER) ? GL_INT : GL_UNSIGNED_BYTE;
+                glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, width, height, 0, format, type, nullptr);
 
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -52,7 +57,10 @@ namespace Donut
             }
             else
             {
-                glTexStorage2D(GL_TEXTURE_2D, 1, format, width, height);
+                // glTexStorage2D is 4.2; use mutable storage for macOS (4.1).
+                GLenum depthFormat = (format == GL_DEPTH24_STENCIL8) ? GL_DEPTH_STENCIL : GL_DEPTH_COMPONENT;
+                GLenum depthType   = (format == GL_DEPTH24_STENCIL8) ? GL_UNSIGNED_INT_24_8 : GL_FLOAT;
+                glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, depthFormat, depthType, nullptr);
 
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -118,7 +126,7 @@ namespace Donut
             m_DepthAttachment = 0;
         }
 
-        glCreateFramebuffers(1, &m_RendererID);
+        glGenFramebuffers(1, &m_RendererID); // glCreateFramebuffers is 4.5 DSA; unavailable on macOS 4.1
         glBindFramebuffer(GL_FRAMEBUFFER, m_RendererID);
 
         bool multisample = m_Specification.Samples > 1;
@@ -230,8 +238,9 @@ namespace Donut
 
     void OpenGLFramebuffer::ClearAttachment(uint32_t attachmentIndex, int value)
     {
-        auto& spec = m_ColorAttachmentSpecifications[attachmentIndex];
-        glClearTexImage(m_ColorAttachments[attachmentIndex], 0,
-            Utils::DonutFBTextureFormatToGL(spec.TextureFormat), GL_INT, &value);
+        // glClearTexImage is 4.4 and unavailable on macOS. Clear the integer
+        // attachment by binding this framebuffer and clearing its draw buffer.
+        glBindFramebuffer(GL_FRAMEBUFFER, m_RendererID);
+        glClearBufferiv(GL_COLOR, static_cast<GLint>(attachmentIndex), &value);
     }
 };

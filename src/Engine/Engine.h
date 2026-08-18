@@ -89,7 +89,16 @@ namespace Donut
         void  SetTargetFPS(int fps)        { m_TargetFPS = fps;                             }
         int   GetTargetFPS()         const { return m_TargetFPS;                            }
         float GetCurrentFPS()        const { return m_CurrentFPS;                           }
-        void  SetComputeHeight(int height) { m_ComputeHeight = height;                      }
+        void  SetComputeHeight(int height)
+        {
+#ifdef __APPLE__
+            // Without compute shaders the geodesic pass runs as a tiled
+            // fragment shader (see DrawGeodesicPass), so very high working
+            // resolutions make each frame take many seconds. Cap it on macOS.
+            if (height > 256) height = 256;
+#endif
+            m_ComputeHeight = height;
+        }
         int   GetComputeHeight()     const { return m_ComputeHeight;                        }
         int   GetComputeWidth()      const { return (m_Width * m_ComputeHeight) / m_Height; }
         void  UpdateComputeDimensions();
@@ -125,6 +134,11 @@ namespace Donut
     private:
         Ref<Shader> CreateComputeProgram(const char* path);
         std::pair<Ref<VertexArray>, Ref<Texture2D>> QuadVAO();
+
+        // Draws the bound geodesic shader over a cw x ch target. On macOS this
+        // is split into scissored tiles (with a flush each) so no single GPU
+        // submission trips the OS watchdog; elsewhere it is one fast draw.
+        void DrawGeodesicPass(int cw, int ch);
     private:
         Ref<VertexArray>   m_QuadVAO;
         Ref<Texture2D>     m_Texture;
@@ -136,6 +150,11 @@ namespace Donut
         Ref<UniformBuffer> m_DiskUBO;
         Ref<UniformBuffer> m_ObjectsUBO;
         Ref<UniformBuffer> m_SimulationUBO;
+
+        // FBO used to render the geodesic pass into m_Texture. The geodesic
+        // shader is a fragment shader (macOS has no compute), so it draws a
+        // fullscreen quad into this framebuffer instead of dispatching compute.
+        uint32_t m_GeodesicFBO = 0;
 
         int   m_Width;
         int   m_Height;

@@ -42,6 +42,17 @@ namespace Donut
             DONUT_INFO("GLFW initialized successfully");
         }
 
+#ifdef __APPLE__
+        // macOS only exposes OpenGL up to 4.1 Core Profile, and requires a
+        // forward-compatible core-profile context for any modern (>= 3.3)
+        // shader to compile. Without these hints GLFW hands back a legacy
+        // 2.1 context and every GLSL shader in the project fails to build.
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#endif
+
         m_Window = glfwCreateWindow(m_Width, m_Height, m_Title.c_str(), nullptr, nullptr);
         if (!m_Window)
         {
@@ -118,7 +129,13 @@ namespace Donut
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+#ifndef __APPLE__
+        // Multi-viewport (dragging ImGui panels out as separate OS windows)
+        // relies on a populated platform-monitor list and is unreliable on
+        // macOS, where it intermittently asserts (Monitors.Size > 0) and
+        // aborts. Docking stays enabled; panels just remain inside the window.
         io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+#endif
 
         SetupImGuiFonts();
         ThemeManager::SetTheme(Theme::Dark);
@@ -131,7 +148,14 @@ namespace Donut
         }
 
         ImGui_ImplGlfw_InitForOpenGL(m_Window, true);
+#ifdef __APPLE__
+        // macOS uses a core-profile context, which rejects the legacy
+        // "#version 130" GLSL the ImGui backend defaults to. 150 is the
+        // minimum core-profile GLSL that macOS's OpenGL 4.1 accepts.
+        ImGui_ImplOpenGL3_Init("#version 150");
+#else
         ImGui_ImplOpenGL3_Init("#version 130");
+#endif
         
         DONUT_INFO("ImGUI initialized successfully");
     }

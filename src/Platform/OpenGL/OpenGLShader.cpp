@@ -120,7 +120,15 @@ namespace Donut
                 std::vector<char> infoLog(maxLength);
                 glGetShaderInfoLog(shader, maxLength, &maxLength, &infoLog[0]);
                 glDeleteShader(shader);
-                std::cout << "Shader compilation failure!" << std::endl << infoLog.data() << std::endl;
+                for (auto id : glShaderIDs)
+                    glDeleteShader(id);
+                glDeleteProgram(program);
+                m_RendererID = 0;
+                // infoLog.data() is null when the driver returns an empty log
+                // (e.g. macOS rejecting a compute shader); streaming a null
+                // char* into std::cout calls strlen(NULL) and crashes.
+                const char* log = infoLog.empty() ? "" : infoLog.data();
+                std::cout << "Shader compilation failure!" << std::endl << log << std::endl;
                 return;
             }
             glAttachShader(program, shader);
@@ -141,7 +149,9 @@ namespace Donut
             glDeleteProgram(m_RendererID);
             for (auto id : glShaderIDs)
                 glDeleteShader(id);
-            std::cout << "Shader link failure!" << std::endl << infoLog.data() << std::endl;
+            m_RendererID = 0;
+            const char* log = infoLog.empty() ? "" : infoLog.data();
+            std::cout << "Shader link failure!" << std::endl << log << std::endl;
             return;
         }
 
@@ -247,16 +257,25 @@ namespace Donut
 
     void OpenGLShader::Dispatch(uint32_t x, uint32_t y, uint32_t z)
     {
+        // Compute shaders require OpenGL 4.3+. On drivers that cap out earlier
+        // (e.g. macOS, which is frozen at 4.1) glDispatchCompute is never
+        // loaded and the pointer is null. Guard so we no-op instead of crash.
+        if (m_RendererID == 0 || glDispatchCompute == nullptr)
+            return;
         glDispatchCompute(x, y, z);
     }
 
     void OpenGLShader::DispatchIndirect(uint32_t offset)
     {
+        if (m_RendererID == 0 || glDispatchComputeIndirect == nullptr)
+            return;
         glDispatchComputeIndirect(offset);
     }
 
     void OpenGLShader::MemoryBarrier(uint32_t barriers)
     {
+        if (glMemoryBarrier == nullptr)
+            return;
         glMemoryBarrier(barriers);
     }
 };

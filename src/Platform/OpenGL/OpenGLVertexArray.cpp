@@ -6,9 +6,11 @@
 
 namespace Donut
 {
-    OpenGLVertexArray::OpenGLVertexArray() 
+    OpenGLVertexArray::OpenGLVertexArray()
     {
-        glCreateVertexArrays(1, &m_RendererID);
+        // glCreateVertexArrays is 4.5 DSA; macOS caps at 4.1. glGenVertexArrays
+        // reserves the name and the VAO is created on first bind (done below).
+        glGenVertexArrays(1, &m_RendererID);
     }
 
     OpenGLVertexArray::~OpenGLVertexArray() 

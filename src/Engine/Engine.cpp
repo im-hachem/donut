@@ -33,7 +33,10 @@ namespace Donut
             { glm::vec4(0.00f, 0.00f, 0.00f, m_SagA.m_Rs), glm::vec4(0, 0, 0, 1), static_cast<float>(m_SagA.m_Mass) }
         };
 
-        m_ComputeProgram = CreateComputeProgram("Assets/Shaders/Geodesic.glsl");
+        // The geodesic ray tracer used to be a compute shader; it is now a
+        // fullscreen vertex+fragment pass (see DispatchCompute) so it runs on
+        // macOS OpenGL 4.1, which has no compute shaders.
+        m_ComputeProgram = Ref<Shader>(Shader::Create("Assets/Shaders/Geodesic.glsl"));
         m_ShaderProgram  = Ref<Shader>(Shader::Create("Assets/Shaders/TexturedQuad.glsl"));
         m_BlurShader     = Ref<Shader>(Shader::Create("Assets/Shaders/Blur.glsl"));
         
@@ -60,6 +63,26 @@ namespace Donut
         auto result = QuadVAO();
         m_QuadVAO = result.first;
         m_Texture = result.second;
+
+        // GLSL 4.10 forbids explicit binding qualifiers on uniform blocks, so
+        // associate the geodesic shader's blocks with their UBO binding points
+        // from the host side instead.
+        if (m_ComputeProgram)
+        {
+            uint32_t prog = m_ComputeProgram->GetRendererID();
+            struct { const char* name; uint32_t point; } blocks[] =
+            {
+                { "Camera", 1 }, { "Disk", 2 }, { "Objects", 3 }, { "Simulation", 4 }
+            };
+            for (const auto& b : blocks)
+            {
+                uint32_t idx = glGetUniformBlockIndex(prog, b.name);
+                if (idx != GL_INVALID_INDEX)
+                    glUniformBlockBinding(prog, idx, b.point);
+            }
+        }
+
+        glGenFramebuffers(1, &m_GeodesicFBO);
     }
 
     void Engine::UpdateWindowDimensions()
@@ -126,30 +149,69 @@ namespace Donut
         RenderCommand::EnableDepthTest();
     }
 
+    void Engine::DrawGeodesicPass(int cw, int ch)
+    {
+        m_QuadVAO->Bind();
+        RenderCommand::DisableDepthTest();
+
+#ifdef __APPLE__
+        // macOS aborts any GPU submission that runs longer than a couple of
+        // seconds ("GPU Hang"). The geodesic ray-marcher can far exceed that in
+        // a single fullscreen draw, so render it in scissored tiles and flush
+        // after each, keeping every submission short enough to survive the
+        // watchdog. Compute-capable platforms draw it in one pass.
+        const int tile = 24;
+        glEnable(GL_SCISSOR_TEST);
+        for (int y = 0; y < ch; y += tile)
+        {
+            int th = std::min(tile, ch - y);
+            for (int x = 0; x < cw; x += tile)
+            {
+                int tw = std::min(tile, cw - x);
+                glScissor(x, y, tw, th);
+                RenderCommand::DrawArrays(6);
+                glFinish();
+            }
+        }
+        glDisable(GL_SCISSOR_TEST);
+#else
+        RenderCommand::DrawArrays(6);
+#endif
+
+        RenderCommand::EnableDepthTest();
+    }
+
     void Engine::DispatchCompute(const Camera& cam)
     {
         auto& hdriManager = HDRIManager::Get();
         m_HDRIEnvironment = hdriManager.GetCurrentHDRI();
-        
+
         int cw = GetComputeWidth();
         int ch = m_ComputeHeight;
 
-        m_Texture->SetData(nullptr, cw * ch * 4);
+        // Render the geodesic pass into m_Texture through an FBO. This replaces
+        // the old compute dispatch + imageStore path, which relied on OpenGL
+        // 4.3 compute and 4.2 image load/store that macOS does not provide.
+        glBindFramebuffer(GL_FRAMEBUFFER, m_GeodesicFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_Texture->GetRendererID(), 0);
+        glViewport(0, 0, cw, ch);
 
         m_ComputeProgram->Bind();
         UploadCameraUBO(cam);
         UploadDiskUBO();
         UploadObjectsUBO(m_Objects);
         UploadSimulationUBO();
-        m_Texture->BindAsImage(0, false);
-        
+        m_ComputeProgram->SetFloat2("u_Resolution", glm::vec2(static_cast<float>(cw), static_cast<float>(ch)));
+
         if (m_HDRIEnvironment)
+        {
             m_HDRIEnvironment->Bind(5);
-        
-        uint32_t groupsX = static_cast<uint32_t>(std::ceil(cw / 16.0f));
-        uint32_t groupsY = static_cast<uint32_t>(std::ceil(ch / 16.0f));
-        m_ComputeProgram->Dispatch(groupsX, groupsY, 1);
-        m_ComputeProgram->MemoryBarrier(IMAGE_ACCESS_BARRIER_BIT);
+            m_ComputeProgram->SetInt("u_HDRIEnvironment", 5);
+        }
+
+        DrawGeodesicPass(cw, ch);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
     void Engine::UploadCameraUBO(const Camera& cam)
@@ -234,6 +296,15 @@ namespace Donut
         data.maxStepsStatic    = m_MaxStepsStatic;
         data.earlyExitDistance = m_EarlyExitDistance;
         data.time              = static_cast<float>(glfwGetTime()) * m_RotationSpeed;
+
+#ifdef __APPLE__
+        // macOS has no compute shaders, so the geodesic pass runs as a tiled
+        // fragment shader under the OS GPU watchdog. The stock step counts
+        // (up to 30000) make a single tile exceed the watchdog and hang the
+        // GPU, so cap them here. Windows/Linux keep the full step count.
+        data.maxStepsMoving = std::min(data.maxStepsMoving, 10000);
+        data.maxStepsStatic = std::min(data.maxStepsStatic, 10000);
+#endif
 
         m_SimulationUBO->SetData(&data, sizeof(data));
         m_SimulationUBO->Bind(4);
@@ -428,21 +499,20 @@ namespace Donut
             return;
         }
         
-        highResFramebuffer->Bind();
-        
-        RenderCommand::SetViewport(0, 0, width, height);
-        RenderCommand::Clear();
-        
         auto highResTexture = Texture2D::Create(computeWidth, computeHeight);
         if (!highResTexture)
         {
             DONUT_ERROR("Failed to create high-resolution texture");
             return;
         }
-        
-        highResTexture->SetData(nullptr, computeWidth * computeHeight * 4);
+
+        // Render the geodesic pass into highResTexture through the geodesic FBO.
+        glBindFramebuffer(GL_FRAMEBUFFER, m_GeodesicFBO);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, highResTexture->GetRendererID(), 0);
+        glViewport(0, 0, computeWidth, computeHeight);
+
         m_ComputeProgram->Bind();
-        
+
         struct UBOData
         {
             glm::vec3 pos;     float _pad0;
@@ -470,17 +540,25 @@ namespace Donut
 
         m_CameraUBO->SetData(&data, sizeof(UBOData));
         m_CameraUBO->Bind(1);
-        
+
         UploadDiskUBO();
         UploadObjectsUBO(m_Objects);
         UploadSimulationUBO();
-        highResTexture->BindAsImage(0, false);
-        
-        uint32_t groupsX = static_cast<uint32_t>(std::ceil(computeWidth / 16.0f));
-        uint32_t groupsY = static_cast<uint32_t>(std::ceil(computeHeight / 16.0f));
-        m_ComputeProgram->Dispatch(groupsX, groupsY, 1);
-        m_ComputeProgram->MemoryBarrier(IMAGE_ACCESS_BARRIER_BIT);
-        
+        m_ComputeProgram->SetFloat2("u_Resolution", glm::vec2(static_cast<float>(computeWidth), static_cast<float>(computeHeight)));
+
+        if (m_HDRIEnvironment)
+        {
+            m_HDRIEnvironment->Bind(5);
+            m_ComputeProgram->SetInt("u_HDRIEnvironment", 5);
+        }
+
+        DrawGeodesicPass(computeWidth, computeHeight);
+
+        // Display the rendered frame into the high-res framebuffer for read-back.
+        highResFramebuffer->Bind();
+        RenderCommand::SetViewport(0, 0, width, height);
+        RenderCommand::Clear();
+
         m_ShaderProgram->Bind();
         m_QuadVAO->Bind();
         

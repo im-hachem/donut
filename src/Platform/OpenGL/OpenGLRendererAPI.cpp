@@ -103,7 +103,10 @@ namespace Donut
 
     void OpenGLRendererAPI::BindImageTexture(uint32_t textureID, uint32_t slot, bool readOnly)
     {
-        glBindImageTexture(slot, textureID, 0, GL_FALSE, 0, 
+        // Image load/store is OpenGL 4.2; the pointer is null on macOS (4.1).
+        if (glBindImageTexture == nullptr)
+            return;
+        glBindImageTexture(slot, textureID, 0, GL_FALSE, 0,
                           readOnly ? GL_READ_ONLY : GL_WRITE_ONLY, GL_RGBA8);
     }
 
