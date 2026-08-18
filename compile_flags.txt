@@ -1,0 +1,15 @@
+-std=c++20
+-Isrc
+-IVendor/glm
+-IVendor/glfw/include
+-IVendor/glad/include
+-IVendor/imgui
+-IVendor/imgui/backends
+-IVendor/ImGuizmo
+-IVendor/toml11/include
+-IVendor/json/single_include
+-IVendor/stb
+-DDONUT_MACOS
+-D_CRT_SECURE_NO_WARNINGS
+-DGLFW_INCLUDE_NONE
+-DDONUT_DEBUG
