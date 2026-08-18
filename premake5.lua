@@ -8,7 +8,7 @@ workspace "Donut"
 		"Release",
 		"Dist"
 	}
-	
+
 	flags
 	{
 		"MultiProcessorCompile"
@@ -20,6 +20,10 @@ workspace "Donut"
 		defines "DONUT_LINUX"
 	filter "system:macosx"
 		defines "DONUT_MACOS"
+		-- Build natively for Apple Silicon (was x86_64 under Rosetta). Native
+		-- arm64 is required for clean Metal work and better performance.
+		architecture "ARM64"
+	filter {}
 
 outputdir = "%{cfg.buildcfg}-%{cfg.system}/%{prj.name}"
 
@@ -55,7 +59,7 @@ project "GLAD"
     {
         "Vendor/glad/include"
     }
-    
+
     filter "system:windows"
         systemversion "latest"
 
@@ -101,7 +105,7 @@ project "GLFW"
 	filter "system:linux"
 		pic "On"
 		systemversion "latest"
-		
+
 		files
 		{
 			"Vendor/glfw/src/x11_init.c",
@@ -110,22 +114,22 @@ project "GLFW"
 			"Vendor/glfw/src/x11_window.c",
 			"Vendor/glfw/src/xkb_unicode.c",
 			"Vendor/glfw/src/xkb_unicode.h",
-			
+
 			"Vendor/glfw/src/wl_init.c",
 			"Vendor/glfw/src/wl_monitor.c",
 			"Vendor/glfw/src/wl_platform.h",
 			"Vendor/glfw/src/wl_window.c",
-			
+
 			"Vendor/glfw/src/posix_module.c",
 			"Vendor/glfw/src/posix_time.c",
 			"Vendor/glfw/src/posix_time.h",
 			"Vendor/glfw/src/posix_thread.c",
 			"Vendor/glfw/src/posix_thread.h",
-			
+
 			"Vendor/glfw/src/glx_context.c",
 			"Vendor/glfw/src/egl_context.c",
 			"Vendor/glfw/src/osmesa_context.c",
-			
+
 			"Vendor/glfw/src/linux_joystick.c",
 			"Vendor/glfw/src/linux_joystick.h"
 		}
@@ -148,11 +152,11 @@ project "GLFW"
 			"Vendor/glfw/src/cocoa_time.c",
 			"Vendor/glfw/src/cocoa_time.h",
 			"Vendor/glfw/src/cocoa_window.m",
-			
+
 			"Vendor/glfw/src/nsgl_context.m",
 			"Vendor/glfw/src/egl_context.c",
 			"Vendor/glfw/src/osmesa_context.c",
-			
+
 			"Vendor/glfw/src/posix_module.c",
 			"Vendor/glfw/src/posix_thread.c",
 			"Vendor/glfw/src/posix_thread.h"
@@ -184,8 +188,8 @@ project "GLFW"
 			"Vendor/glfw/src/osmesa_context.c"
 		}
 
-		defines 
-		{ 
+		defines
+		{
 			"_GLFW_WIN32",
 			"_CRT_SECURE_NO_WARNINGS",
 		}
@@ -194,7 +198,7 @@ project "GLFW"
 		runtime "Debug"
 		symbols "on"
 
-	filter { "system:windows", "configurations:Debug-AS" }	
+	filter { "system:windows", "configurations:Debug-AS" }
 		runtime "Debug"
 		symbols "on"
 		sanitize { "Address" }
@@ -213,10 +217,10 @@ project "ImGui"
 	kind "StaticLib"
 	language "C++"
 	staticruntime "on"
-	
+
 	targetdir ("bin/" .. outputdir)
 	objdir ("bin-int/" .. outputdir)
-	
+
 	files
 	{
 		"Vendor/imgui/imgui.cpp",
@@ -225,24 +229,24 @@ project "ImGui"
 		"Vendor/imgui/imgui_widgets.cpp",
 		"Vendor/imgui/imgui_demo.cpp"
 	}
-	
+
 	filter "system:windows"
 		systemversion "latest"
 		cppdialect "C++17"
-	
+
 	filter "system:linux"
 		pic "On"
 		systemversion "latest"
 		cppdialect "C++17"
-	
+
 	filter "configurations:Debug"
 		runtime "Debug"
 		symbols "on"
-	
+
 	filter "configurations:Release"
 		runtime "Release"
 		optimize "on"
-	
+
 	filter "configurations:Dist"
 		runtime "Release"
 		optimize "on"
@@ -252,39 +256,39 @@ project "ImGuizmo"
 	kind "StaticLib"
 	language "C++"
 	staticruntime "on"
-	
+
 	targetdir ("bin/" .. outputdir)
 	objdir ("bin-int/" .. outputdir)
-	
+
 	files
 	{
 		"Vendor/ImGuizmo/ImGuizmo.cpp",
 		"Vendor/ImGuizmo/ImGuizmo.h"
 	}
-	
+
 	includedirs
 	{
 		"%{IncludeDir.imgui}",
 		"%{IncludeDir.imguizmo}"
 	}
-	
+
 	filter "system:windows"
 		systemversion "latest"
 		cppdialect "C++17"
-	
+
 	filter "system:linux"
 		pic "On"
 		systemversion "latest"
 		cppdialect "C++17"
-	
+
 	filter "configurations:Debug"
 		runtime "Debug"
 		symbols "on"
-	
+
 	filter "configurations:Release"
 		runtime "Release"
 		optimize "on"
-	
+
 	filter "configurations:Dist"
 		runtime "Release"
 		optimize "on"
@@ -318,10 +322,10 @@ project "Donut"
 		"src/Rendering/Framebuffer.cpp",
 		"src/Platform/OpenGL/OpenGLFramebuffer.h",
 		"src/Platform/OpenGL/OpenGLFramebuffer.cpp",
-		
+
 		"Vendor/imgui/backends/imgui_impl_glfw.cpp",
 		"Vendor/imgui/backends/imgui_impl_opengl3.cpp",
-		
+
 		"Assets/Fonts/Inter/static/Inter_18pt-Regular.ttf",
 		"Assets/Fonts/Inter/static/Inter_18pt-Bold.ttf",
 		"Assets/Fonts/Inter/static/Inter_18pt-Light.ttf"
@@ -330,7 +334,7 @@ project "Donut"
 	includedirs
 	{
 		"src",
-		
+
 		"%{IncludeDir.glm}",
 		"%{IncludeDir.glfw}",
 		"%{IncludeDir.glad}",
@@ -359,12 +363,20 @@ project "Donut"
 		}
 
 	filter "system:macosx"
+		-- Objective-C++ (Metal) sources compile only on macOS.
+		files
+		{
+			"src/**.mm"
+		}
+
 		links
 		{
 			"Cocoa.framework",
 			"IOKit.framework",
 			"CoreFoundation.framework",
-			"QuartzCore.framework"
+			"QuartzCore.framework",
+			"Metal.framework",
+			"Foundation.framework"
 		}
 
 	filter "configurations:Debug"

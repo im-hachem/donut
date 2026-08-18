@@ -35,7 +35,7 @@ namespace Donut
         double m_Radius;
         double m_Rs;
 
-        BlackHole(glm::vec3 pos, float mass) 
+        BlackHole(glm::vec3 pos, float mass)
             : m_Position(pos), m_Mass(mass)
         {
             m_Rs = 2.0 * G * m_Mass / (c * c);
@@ -102,33 +102,33 @@ namespace Donut
         int   GetComputeHeight()     const { return m_ComputeHeight;                        }
         int   GetComputeWidth()      const { return (m_Width * m_ComputeHeight) / m_Height; }
         void  UpdateComputeDimensions();
-        
+
         int   GetMaxStepsMoving()    const { return m_MaxStepsMoving; }
         int   GetMaxStepsStatic()    const { return m_MaxStepsStatic; }
         float GetEarlyExitDistance() const { return m_EarlyExitDistance; }
         void  SetMaxStepsMoving(int steps) { m_MaxStepsMoving = steps; }
         void  SetMaxStepsStatic(int steps) { m_MaxStepsStatic = steps; }
         void  SetEarlyExitDistance(float distance) { m_EarlyExitDistance = distance; }
-        
+
         float GetDiskThickness()         const  { return m_DiskThickness;      }
         void  SetDiskThickness(float thickness) { m_DiskThickness = thickness; }
-        
+
         float GetDiskDensity()            const { return m_DiskDensity;    }
         void  SetDiskDensity(float density)     { m_DiskDensity = density; }
-        
+
         float GetRotationSpeed()          const { return m_RotationSpeed;  }
         void  SetRotationSpeed(float speed)     { m_RotationSpeed = speed; }
-        
+
         float GetBlurStrength()           const { return m_BlurStrength;     }
         void  SetBlurStrength(float strength)   { m_BlurStrength = strength; }
-        
+
         float GetGlowIntensity()          const { return m_GlowIntensity;      }
         void  SetGlowIntensity(float intensity) { m_GlowIntensity = intensity; }
-        
+
         void LoadObjectsFromScene(const std::vector<Donut::Object>& objects);
         void ExportHighResFrame(const std::string& filename, int width = 4096, int height = 3072);
         void PrintObjectInfo() const;
-        
+
         void SetHDRIEnvironment(Ref<CubemapTexture> hdri) { m_HDRIEnvironment = hdri; }
         Ref<CubemapTexture> GetHDRIEnvironment()    const { return m_HDRIEnvironment; }
     private:
@@ -170,12 +170,12 @@ namespace Donut
         BlackHole               m_SagA;
         Camera                  m_Camera;
         bool                    m_Gravity = false;
-        
+
         int   m_MaxStepsMoving    = 60000;
         int   m_MaxStepsStatic    = 30000;
         float m_EarlyExitDistance = 5.0e11f;
-        
-        float m_DiskThickness = 0.1f;    
+
+        float m_DiskThickness = 0.1f;
         float m_DiskDensity   = 0.1f;
         float m_RotationSpeed = 1.0f;
         float m_BlurStrength  = 2.0f;

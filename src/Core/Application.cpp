@@ -10,6 +10,10 @@
 #include <GLFW/glfw3.h>
 #include <ImGuizmo.h>
 
+#ifdef __APPLE__
+#include "Platform/Metal/MetalContext.h"
+#endif
+
 namespace Donut
 {
     Application* Application::s_Instance = nullptr;
@@ -103,9 +107,14 @@ namespace Donut
         m_StateManager->OnEvent(event);
     }
 
-    void Application::OnInit()     
-    { 
+    void Application::OnInit()
+    {
         Logger::Init();
+
+#ifdef __APPLE__
+        MetalProbe();           // Phase 1: native Metal device available?
+        MetalComputeSelfTest(); // Phase 1: full compute dispatch + read-back works?
+#endif
         
         SettingsManager::Initialize();
         
