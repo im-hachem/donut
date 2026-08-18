@@ -160,7 +160,10 @@ namespace Donut
         // a single fullscreen draw, so render it in scissored tiles and flush
         // after each, keeping every submission short enough to survive the
         // watchdog. Compute-capable platforms draw it in one pass.
-        const int tile = 24;
+        // Largest tile that keeps a tile's worst-case work (tile^2 * stepCap)
+        // inside the safe watchdog zone measured on this GPU (~25M pixel-steps
+        // per submission); bigger tiles mean fewer glFinish stalls.
+        const int tile = 64;
         glEnable(GL_SCISSOR_TEST);
         for (int y = 0; y < ch; y += tile)
         {
@@ -302,8 +305,11 @@ namespace Donut
         // fragment shader under the OS GPU watchdog. The stock step counts
         // (up to 30000) make a single tile exceed the watchdog and hang the
         // GPU, so cap them here. Windows/Linux keep the full step count.
-        data.maxStepsMoving = std::min(data.maxStepsMoving, 10000);
-        data.maxStepsStatic = std::min(data.maxStepsStatic, 10000);
+        // While the camera moves, render cheaply so interaction stays smooth;
+        // when it settles, spend more steps for a cleaner image. Both stay well
+        // under the per-tile GPU-watchdog budget (see DrawGeodesicPass).
+        data.maxStepsMoving = std::min(data.maxStepsMoving, 4000);
+        data.maxStepsStatic = std::min(data.maxStepsStatic, 6000);
 #endif
 
         m_SimulationUBO->SetData(&data, sizeof(data));
