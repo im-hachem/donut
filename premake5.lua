@@ -363,10 +363,12 @@ project "Donut"
 		}
 
 	filter "system:macosx"
-		-- Objective-C++ (Metal) sources compile only on macOS.
+		-- Objective-C++ (Metal) sources + the ImGui Vulkan backend compile only
+		-- on macOS (Vulkan headers come from Homebrew there).
 		files
 		{
-			"src/**.mm"
+			"src/**.mm",
+			"Vendor/imgui/backends/imgui_impl_vulkan.cpp"
 		}
 
 		-- Compile the Slang shaders to Assets/Shaders/generated/ before building.
@@ -376,6 +378,10 @@ project "Donut"
 			'bash "%{wks.location}/Tools/compile-shaders.sh"'
 		}
 
+		-- Vulkan (via MoltenVK) from Homebrew; see Tools/vulkan-env.sh for runtime.
+		includedirs { "/opt/homebrew/include" }
+		libdirs     { "/opt/homebrew/lib" }
+
 		links
 		{
 			"Cocoa.framework",
@@ -383,7 +389,8 @@ project "Donut"
 			"CoreFoundation.framework",
 			"QuartzCore.framework",
 			"Metal.framework",
-			"Foundation.framework"
+			"Foundation.framework",
+			"vulkan"
 		}
 
 	filter "configurations:Debug"

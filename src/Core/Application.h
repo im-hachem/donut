@@ -10,6 +10,8 @@
 
 namespace Donut
 {
+    class VulkanRenderer; // live-window Vulkan backend (Platform/Vulkan)
+
     class Application
     {
     public:
@@ -31,10 +33,12 @@ namespace Donut
         void OnRender();
         void OnEvent(Event& event);
         void SetupDockingLayout();
+        void BuildVulkanUI(); // ImGui UI built each frame on the Vulkan path
     private:
         Scope<StateManager> m_StateManager;
         Scope<Window> m_Window;
         Scope<Engine> m_Engine;
+        Scope<VulkanRenderer> m_VulkanRenderer; // non-null only when the Vulkan API is selected
 
         bool m_Running;
         bool m_Minimized;

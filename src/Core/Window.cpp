@@ -1,6 +1,7 @@
 #include <glad/glad.h>
 #include "Window.h"
 #include "ThemeManager.h"
+#include "Rendering/Renderer.h"   // RendererAPI::GetAPI()
 
 #include <cstdint>
 
@@ -42,16 +43,24 @@ namespace Donut
             DONUT_INFO("GLFW initialized successfully");
         }
 
+        if (RendererAPI::GetAPI() == RendererAPI::API::Vulkan)
+        {
+            // Vulkan manages presentation itself; GLFW must not create a GL context.
+            glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
+        }
+        else
+        {
 #ifdef __APPLE__
-        // macOS only exposes OpenGL up to 4.1 Core Profile, and requires a
-        // forward-compatible core-profile context for any modern (>= 3.3)
-        // shader to compile. Without these hints GLFW hands back a legacy
-        // 2.1 context and every GLSL shader in the project fails to build.
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
-        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
-        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+            // macOS only exposes OpenGL up to 4.1 Core Profile, and requires a
+            // forward-compatible core-profile context for any modern (>= 3.3)
+            // shader to compile. Without these hints GLFW hands back a legacy
+            // 2.1 context and every GLSL shader in the project fails to build.
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+            glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+            glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+            glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #endif
+        }
 
         m_Window = glfwCreateWindow(m_Width, m_Height, m_Title.c_str(), nullptr, nullptr);
         if (!m_Window)
@@ -63,7 +72,8 @@ namespace Donut
         
         DONUT_INFO("GLFW window created successfully");
 
-        glfwMakeContextCurrent(m_Window);
+        if (RendererAPI::GetAPI() != RendererAPI::API::Vulkan)
+            glfwMakeContextCurrent(m_Window);
         glfwSetWindowUserPointer(m_Window, this);
 
         glfwSetErrorCallback(GLFWErrorCallback);
@@ -100,7 +110,8 @@ namespace Donut
     void Window::OnUpdate() const
     {
         glfwPollEvents();
-        glfwSwapBuffers(m_Window);
+        if (RendererAPI::GetAPI() != RendererAPI::API::Vulkan)
+            glfwSwapBuffers(m_Window); // Vulkan presents via the swapchain instead
     }
 
     bool Window::ShouldClose() const
@@ -219,7 +230,7 @@ namespace Donut
 
     void Window::GLFWErrorCallback(int error, const char* description)
     {
-        DONUT_ERROR("GLFW Error (", error, "): ", description);
+        DONUT_ERROR("GLFW Error ({}): {}", error, description ? description : "");
     }
 
     void Window::GLFWWindowCloseCallback(GLFWwindow* window)
