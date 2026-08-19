@@ -225,7 +225,9 @@ namespace Donut
 
         glUseProgram(shaderProgram);
         glUniform1i(glGetUniformLocation(shaderProgram, "u_EquirectangularMap"), 0);
-        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "u_Projection"), 1, GL_FALSE, &captureProjection[0][0]);
+        // EquirectToCubemap is authored in Slang (row-major); transpose glm's
+        // column-major matrices on upload (GL_TRUE) to match.
+        glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "u_Projection"), 1, GL_TRUE, &captureProjection[0][0]);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, hdrTexture);
 
@@ -233,7 +235,7 @@ namespace Donut
         glBindFramebuffer(GL_FRAMEBUFFER, captureFBO);
         for (unsigned int i = 0; i < 6; ++i)
         {
-            glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "u_View"), 1, GL_FALSE, &captureViews[i][0][0]);
+            glUniformMatrix4fv(glGetUniformLocation(shaderProgram, "u_View"), 1, GL_TRUE, &captureViews[i][0][0]);
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, m_RendererID, 0);
             glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             glBindVertexArray(cubeVAO);

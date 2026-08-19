@@ -19,9 +19,30 @@ namespace Donut
         return 0;
     }
 
+    // Shaders are authored in Slang and compiled to Assets/Shaders/generated/
+    // <name>.glsl by Tools/compile-shaders.sh. Given a legacy ".../<name>.glsl"
+    // path, prefer that generated file when present; otherwise fall back to the
+    // hand-written GLSL (e.g. shaders not yet ported to Slang).
+    static std::string ResolveShaderPath(const std::string& filepath)
+    {
+        size_t slash = filepath.find_last_of("/\\");
+        std::string dir  = (slash == std::string::npos) ? std::string() : filepath.substr(0, slash + 1);
+        std::string file = (slash == std::string::npos) ? filepath : filepath.substr(slash + 1);
+        size_t dot = file.rfind('.');
+        std::string base = (dot == std::string::npos) ? file : file.substr(0, dot);
+
+        std::string generated = dir + "generated/" + base + ".glsl";
+        std::ifstream test(generated);
+        if (test.good())
+            return generated;
+        return filepath;
+    }
+
     OpenGLShader::OpenGLShader(const std::string& filepath)
     {
-        std::string source = ReadFile(filepath);
+        std::string resolved = ResolveShaderPath(filepath);
+        m_IsSlang = (resolved != filepath);
+        std::string source = ReadFile(resolved);
         auto shaderSources = PreProcess(source);
         Compile(shaderSources);
 
@@ -33,7 +54,7 @@ namespace Donut
     }
 
     OpenGLShader::OpenGLShader(const std::string& name, const std::string& vertexSrc, const std::string& fragmentSrc)
-        : m_Name(name) 
+        : m_Name(name)
     {
         std::unordered_map<uint32_t, std::string> sources;
         sources[GL_VERTEX_SHADER] = vertexSrc;
@@ -42,7 +63,7 @@ namespace Donut
     }
 
     OpenGLShader::OpenGLShader(const std::string& name, const std::string& computeSrc)
-        : m_Name(name) 
+        : m_Name(name)
     {
         std::unordered_map<uint32_t, std::string> sources;
         sources[GL_COMPUTE_SHADER] = computeSrc;
@@ -57,9 +78,9 @@ namespace Donut
     std::string OpenGLShader::ReadFile(const std::string& filepath)
     {
         std::string result;
-        std::ifstream in(filepath, std::ios::in | 
+        std::ifstream in(filepath, std::ios::in |
                                    std::ios::binary);
-        
+
         if (in)
         {
             in.seekg(0, std::ios::end);
@@ -90,7 +111,7 @@ namespace Donut
 
             size_t nextLinePos = source.find_first_not_of("\r\n", eol);
             pos = source.find(typeToken, nextLinePos);
-            shaderSources[ShaderTypeFromString(type)] = (pos == std::string::npos) ? source.substr(nextLinePos) : 
+            shaderSources[ShaderTypeFromString(type)] = (pos == std::string::npos) ? source.substr(nextLinePos) :
             source.substr(nextLinePos, pos - nextLinePos);
         }
 
@@ -225,34 +246,34 @@ namespace Donut
         glUniform1f(location, value);
     }
 
-    void OpenGLShader::UploadUniformFloat2(const std::string& name, const glm::vec2& value) 
+    void OpenGLShader::UploadUniformFloat2(const std::string& name, const glm::vec2& value)
     {
         int location = glGetUniformLocation(m_RendererID, name.c_str());
         glUniform2f(location, value.x, value.y);
     }
 
-    void OpenGLShader::UploadUniformFloat3(const std::string& name, const glm::vec3& value) 
+    void OpenGLShader::UploadUniformFloat3(const std::string& name, const glm::vec3& value)
     {
         int location = glGetUniformLocation(m_RendererID, name.c_str());
         glUniform3f(location, value.x, value.y, value.z);
     }
 
-    void OpenGLShader::UploadUniformFloat4(const std::string& name, const glm::vec4& value) 
+    void OpenGLShader::UploadUniformFloat4(const std::string& name, const glm::vec4& value)
     {
         int location = glGetUniformLocation(m_RendererID, name.c_str());
         glUniform4f(location, value.x, value.y, value.z, value.w);
     }
 
-    void OpenGLShader::UploadUniformMat3(const std::string& name, const glm::mat3& matrix) 
+    void OpenGLShader::UploadUniformMat3(const std::string& name, const glm::mat3& matrix)
     {
         int location = glGetUniformLocation(m_RendererID, name.c_str());
-        glUniformMatrix3fv(location, 1, GL_FALSE, glm::value_ptr(matrix));
+        glUniformMatrix3fv(location, 1, m_IsSlang ? GL_TRUE : GL_FALSE, glm::value_ptr(matrix));
     }
 
-    void OpenGLShader::UploadUniformMat4(const std::string& name, const glm::mat4& matrix) 
+    void OpenGLShader::UploadUniformMat4(const std::string& name, const glm::mat4& matrix)
     {
         int location = glGetUniformLocation(m_RendererID, name.c_str());
-        glUniformMatrix4fv(location, 1, GL_FALSE, glm::value_ptr(matrix));
+        glUniformMatrix4fv(location, 1, m_IsSlang ? GL_TRUE : GL_FALSE, glm::value_ptr(matrix));
     }
 
     void OpenGLShader::Dispatch(uint32_t x, uint32_t y, uint32_t z)

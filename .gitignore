@@ -1,6 +1,8 @@
 logs/
 config/
 
+compile_flags.txt
+
 *.log
 imgui.ini
 Scene.json
@@ -21,3 +23,6 @@ Makefile
 *.sln
 *.vcxproj
 *.vcxproj.*
+
+Tools/slang/
+Assets/Shaders/generated/

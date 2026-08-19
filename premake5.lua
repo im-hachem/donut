@@ -369,6 +369,13 @@ project "Donut"
 			"src/**.mm"
 		}
 
+		-- Compile the Slang shaders to Assets/Shaders/generated/ before building.
+		-- Requires Tools/slang (Tools/fetch-slang.sh) and spirv-cross on PATH.
+		prebuildcommands
+		{
+			'bash "%{wks.location}/Tools/compile-shaders.sh"'
+		}
+
 		links
 		{
 			"Cocoa.framework",

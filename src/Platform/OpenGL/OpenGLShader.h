@@ -50,5 +50,9 @@ namespace Donut
     private:
         uint32_t    m_RendererID = 0;
         std::string m_Name;
+        // True when loaded from a Slang-compiled GLSL. Slang expects row-major
+        // matrix data, so matrix uniforms are transposed on upload (glm is
+        // column-major) to keep all matrix math correct.
+        bool        m_IsSlang = false;
     };
 };
