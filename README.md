@@ -1,4 +1,4 @@
-![Logo](Branding/Logo-Black.jpg)
+![Logo](branding/Logo-Black.jpg)
 A real-time black hole ray tracer.
 
 ## Table of Contents
