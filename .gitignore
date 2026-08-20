@@ -24,5 +24,5 @@ Makefile
 *.vcxproj
 *.vcxproj.*
 
-Tools/slang/
-Assets/Shaders/generated/
+tools/slang/
+assets/shaders/generated/

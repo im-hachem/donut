@@ -1,22 +1,22 @@
-[submodule "Vendor/glfw"]
-	path = Vendor/glfw
+[submodule "ext/glfw"]
+	path = ext/glfw
 	url = https://github.com/glfw/glfw.git
-[submodule "Vendor/glm"]
-	path = Vendor/glm
+[submodule "ext/glm"]
+	path = ext/glm
 	url = https://github.com/g-truc/glm.git
-[submodule "Vendor/imgui"]
-	path = Vendor/imgui
+[submodule "ext/imgui"]
+	path = ext/imgui
 	url = https://github.com/ocornut/imgui.git
 	branch = docking
-[submodule "Vendor/toml11"]
-	path = Vendor/toml11
+[submodule "ext/toml11"]
+	path = ext/toml11
 	url = https://github.com/ToruNiina/toml11
-[submodule "Vendor/ImGuizmo"]
-	path = Vendor/ImGuizmo
+[submodule "ext/ImGuizmo"]
+	path = ext/ImGuizmo
 	url = https://github.com/CedricGuillemet/ImGuizmo.git
-[submodule "Vendor/json"]
-	path = Vendor/json
+[submodule "ext/json"]
+	path = ext/json
 	url = https://github.com/nlohmann/json.git
-[submodule "Vendor/stb"]
-	path = Vendor/stb
+[submodule "ext/stb"]
+	path = ext/stb
 	url = https://github.com/nothings/stb.git

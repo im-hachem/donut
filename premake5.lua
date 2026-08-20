@@ -28,15 +28,15 @@ workspace "Donut"
 outputdir = "%{cfg.buildcfg}-%{cfg.system}/%{prj.name}"
 
 IncludeDir = {}
-IncludeDir["glm"]            = "Vendor/glm"
-IncludeDir["glfw"]           = "Vendor/glfw/include"
-IncludeDir["glad"]           = "Vendor/glad/include"
-IncludeDir["imgui"]          = "Vendor/imgui"
-IncludeDir["imgui_backends"] = "Vendor/imgui/backends"
-IncludeDir["imguizmo"]       = "Vendor/ImGuizmo"
-IncludeDir["toml11"]         = "Vendor/toml11/include"
-IncludeDir["nlohmann"]       = "Vendor/json/single_include"
-IncludeDir["stb"]            = "Vendor/stb"
+IncludeDir["glm"]            = "ext/glm"
+IncludeDir["glfw"]           = "ext/glfw/include"
+IncludeDir["glad"]           = "ext/glad/include"
+IncludeDir["imgui"]          = "ext/imgui"
+IncludeDir["imgui_backends"] = "ext/imgui/backends"
+IncludeDir["imguizmo"]       = "ext/ImGuizmo"
+IncludeDir["toml11"]         = "ext/toml11/include"
+IncludeDir["nlohmann"]       = "ext/json/single_include"
+IncludeDir["stb"]            = "ext/stb"
 
 group "Dependencies"
 
@@ -49,15 +49,15 @@ project "GLAD"
 
     files
     {
-        "Vendor/glad/include/glad/glad.h",
-        "Vendor/glad/include/KHR/khrplatform.h",
+        "ext/glad/include/glad/glad.h",
+        "ext/glad/include/KHR/khrplatform.h",
 
-        "Vendor/glad/src/glad.c"
+        "ext/glad/src/glad.c"
     }
 
     includedirs
     {
-        "Vendor/glad/include"
+        "ext/glad/include"
     }
 
     filter "system:windows"
@@ -82,24 +82,24 @@ project "GLFW"
 
 	files
 	{
-		"Vendor/glfw/src/context.c",
-		"Vendor/glfw/src/init.c",
-		"Vendor/glfw/src/input.c",
-		"Vendor/glfw/src/monitor.c",
-		"Vendor/glfw/src/platform.c",
-		"Vendor/glfw/src/vulkan.c",
-		"Vendor/glfw/src/window.c",
+		"ext/glfw/src/context.c",
+		"ext/glfw/src/init.c",
+		"ext/glfw/src/input.c",
+		"ext/glfw/src/monitor.c",
+		"ext/glfw/src/platform.c",
+		"ext/glfw/src/vulkan.c",
+		"ext/glfw/src/window.c",
 
-		"Vendor/glfw/src/internal.h",
-		"Vendor/glfw/src/platform.h",
-		"Vendor/glfw/src/mappings.h",
+		"ext/glfw/src/internal.h",
+		"ext/glfw/src/platform.h",
+		"ext/glfw/src/mappings.h",
 
-		"Vendor/glfw/src/null_init.c",
-		"Vendor/glfw/src/null_joystick.c",
-		"Vendor/glfw/src/null_joystick.h",
-		"Vendor/glfw/src/null_monitor.c",
-		"Vendor/glfw/src/null_platform.h",
-		"Vendor/glfw/src/null_window.c",
+		"ext/glfw/src/null_init.c",
+		"ext/glfw/src/null_joystick.c",
+		"ext/glfw/src/null_joystick.h",
+		"ext/glfw/src/null_monitor.c",
+		"ext/glfw/src/null_platform.h",
+		"ext/glfw/src/null_window.c",
 	}
 
 	filter "system:linux"
@@ -108,30 +108,30 @@ project "GLFW"
 
 		files
 		{
-			"Vendor/glfw/src/x11_init.c",
-			"Vendor/glfw/src/x11_monitor.c",
-			"Vendor/glfw/src/x11_platform.h",
-			"Vendor/glfw/src/x11_window.c",
-			"Vendor/glfw/src/xkb_unicode.c",
-			"Vendor/glfw/src/xkb_unicode.h",
+			"ext/glfw/src/x11_init.c",
+			"ext/glfw/src/x11_monitor.c",
+			"ext/glfw/src/x11_platform.h",
+			"ext/glfw/src/x11_window.c",
+			"ext/glfw/src/xkb_unicode.c",
+			"ext/glfw/src/xkb_unicode.h",
 
-			"Vendor/glfw/src/wl_init.c",
-			"Vendor/glfw/src/wl_monitor.c",
-			"Vendor/glfw/src/wl_platform.h",
-			"Vendor/glfw/src/wl_window.c",
+			"ext/glfw/src/wl_init.c",
+			"ext/glfw/src/wl_monitor.c",
+			"ext/glfw/src/wl_platform.h",
+			"ext/glfw/src/wl_window.c",
 
-			"Vendor/glfw/src/posix_module.c",
-			"Vendor/glfw/src/posix_time.c",
-			"Vendor/glfw/src/posix_time.h",
-			"Vendor/glfw/src/posix_thread.c",
-			"Vendor/glfw/src/posix_thread.h",
+			"ext/glfw/src/posix_module.c",
+			"ext/glfw/src/posix_time.c",
+			"ext/glfw/src/posix_time.h",
+			"ext/glfw/src/posix_thread.c",
+			"ext/glfw/src/posix_thread.h",
 
-			"Vendor/glfw/src/glx_context.c",
-			"Vendor/glfw/src/egl_context.c",
-			"Vendor/glfw/src/osmesa_context.c",
+			"ext/glfw/src/glx_context.c",
+			"ext/glfw/src/egl_context.c",
+			"ext/glfw/src/osmesa_context.c",
 
-			"Vendor/glfw/src/linux_joystick.c",
-			"Vendor/glfw/src/linux_joystick.h"
+			"ext/glfw/src/linux_joystick.c",
+			"ext/glfw/src/linux_joystick.h"
 		}
 
 		defines
@@ -144,22 +144,22 @@ project "GLFW"
 
 		files
 		{
-			"Vendor/glfw/src/cocoa_init.m",
-			"Vendor/glfw/src/cocoa_joystick.h",
-			"Vendor/glfw/src/cocoa_joystick.m",
-			"Vendor/glfw/src/cocoa_monitor.m",
-			"Vendor/glfw/src/cocoa_platform.h",
-			"Vendor/glfw/src/cocoa_time.c",
-			"Vendor/glfw/src/cocoa_time.h",
-			"Vendor/glfw/src/cocoa_window.m",
+			"ext/glfw/src/cocoa_init.m",
+			"ext/glfw/src/cocoa_joystick.h",
+			"ext/glfw/src/cocoa_joystick.m",
+			"ext/glfw/src/cocoa_monitor.m",
+			"ext/glfw/src/cocoa_platform.h",
+			"ext/glfw/src/cocoa_time.c",
+			"ext/glfw/src/cocoa_time.h",
+			"ext/glfw/src/cocoa_window.m",
 
-			"Vendor/glfw/src/nsgl_context.m",
-			"Vendor/glfw/src/egl_context.c",
-			"Vendor/glfw/src/osmesa_context.c",
+			"ext/glfw/src/nsgl_context.m",
+			"ext/glfw/src/egl_context.c",
+			"ext/glfw/src/osmesa_context.c",
 
-			"Vendor/glfw/src/posix_module.c",
-			"Vendor/glfw/src/posix_thread.c",
-			"Vendor/glfw/src/posix_thread.h"
+			"ext/glfw/src/posix_module.c",
+			"ext/glfw/src/posix_thread.c",
+			"ext/glfw/src/posix_thread.h"
 		}
 
 		defines
@@ -172,20 +172,20 @@ project "GLFW"
 
 		files
 		{
-			"Vendor/glfw/src/win32_init.c",
-			"Vendor/glfw/src/win32_joystick.c",
-			"Vendor/glfw/src/win32_joystick.h",
-			"Vendor/glfw/src/win32_module.c",
-			"Vendor/glfw/src/win32_monitor.c",
-			"Vendor/glfw/src/win32_platform.h",
-			"Vendor/glfw/src/win32_thread.c",
-			"Vendor/glfw/src/win32_thread.h",
-			"Vendor/glfw/src/win32_time.c",
-			"Vendor/glfw/src/win32_time.h",
-			"Vendor/glfw/src/win32_window.c",
-			"Vendor/glfw/src/wgl_context.c",
-			"Vendor/glfw/src/egl_context.c",
-			"Vendor/glfw/src/osmesa_context.c"
+			"ext/glfw/src/win32_init.c",
+			"ext/glfw/src/win32_joystick.c",
+			"ext/glfw/src/win32_joystick.h",
+			"ext/glfw/src/win32_module.c",
+			"ext/glfw/src/win32_monitor.c",
+			"ext/glfw/src/win32_platform.h",
+			"ext/glfw/src/win32_thread.c",
+			"ext/glfw/src/win32_thread.h",
+			"ext/glfw/src/win32_time.c",
+			"ext/glfw/src/win32_time.h",
+			"ext/glfw/src/win32_window.c",
+			"ext/glfw/src/wgl_context.c",
+			"ext/glfw/src/egl_context.c",
+			"ext/glfw/src/osmesa_context.c"
 		}
 
 		defines
@@ -223,11 +223,11 @@ project "ImGui"
 
 	files
 	{
-		"Vendor/imgui/imgui.cpp",
-		"Vendor/imgui/imgui_draw.cpp",
-		"Vendor/imgui/imgui_tables.cpp",
-		"Vendor/imgui/imgui_widgets.cpp",
-		"Vendor/imgui/imgui_demo.cpp"
+		"ext/imgui/imgui.cpp",
+		"ext/imgui/imgui_draw.cpp",
+		"ext/imgui/imgui_tables.cpp",
+		"ext/imgui/imgui_widgets.cpp",
+		"ext/imgui/imgui_demo.cpp"
 	}
 
 	filter "system:windows"
@@ -262,8 +262,8 @@ project "ImGuizmo"
 
 	files
 	{
-		"Vendor/ImGuizmo/ImGuizmo.cpp",
-		"Vendor/ImGuizmo/ImGuizmo.h"
+		"ext/ImGuizmo/ImGuizmo.cpp",
+		"ext/ImGuizmo/ImGuizmo.h"
 	}
 
 	includedirs
@@ -313,22 +313,22 @@ project "Donut"
 
 	files
 	{
-		"Vendor/glm/glm/**.hpp",
-		"Vendor/glm/glm/**.inl",
+		"ext/glm/glm/**.hpp",
+		"ext/glm/glm/**.inl",
 
 		"src/**.h",
 		"src/**.cpp",
-		"src/Rendering/Framebuffer.h",
-		"src/Rendering/Framebuffer.cpp",
-		"src/Platform/OpenGL/OpenGLFramebuffer.h",
-		"src/Platform/OpenGL/OpenGLFramebuffer.cpp",
+		"src/rendering/framebuffer.h",
+		"src/rendering/framebuffer.cpp",
+		"src/platform/opengl/opengl_framebuffer.h",
+		"src/platform/opengl/opengl_framebuffer.cpp",
 
-		"Vendor/imgui/backends/imgui_impl_glfw.cpp",
-		"Vendor/imgui/backends/imgui_impl_opengl3.cpp",
+		"ext/imgui/backends/imgui_impl_glfw.cpp",
+		"ext/imgui/backends/imgui_impl_opengl3.cpp",
 
-		"Assets/Fonts/Inter/static/Inter_18pt-Regular.ttf",
-		"Assets/Fonts/Inter/static/Inter_18pt-Bold.ttf",
-		"Assets/Fonts/Inter/static/Inter_18pt-Light.ttf"
+		"assets/fonts/inter/static/Inter_18pt-Regular.ttf",
+		"assets/fonts/inter/static/Inter_18pt-Bold.ttf",
+		"assets/fonts/inter/static/Inter_18pt-Light.ttf"
 	}
 
 	includedirs
@@ -368,17 +368,17 @@ project "Donut"
 		files
 		{
 			"src/**.mm",
-			"Vendor/imgui/backends/imgui_impl_vulkan.cpp"
+			"ext/imgui/backends/imgui_impl_vulkan.cpp"
 		}
 
-		-- Compile the Slang shaders to Assets/Shaders/generated/ before building.
-		-- Requires Tools/slang (Tools/fetch-slang.sh) and spirv-cross on PATH.
+		-- Compile the Slang shaders to assets/shaders/generated/ before building.
+		-- Requires tools/slang (tools/fetch-slang.sh) and spirv-cross on PATH.
 		prebuildcommands
 		{
-			'bash "%{wks.location}/Tools/compile-shaders.sh"'
+			'bash "%{wks.location}/tools/compile-shaders.sh"'
 		}
 
-		-- Vulkan (via MoltenVK) from Homebrew; see Tools/vulkan-env.sh for runtime.
+		-- Vulkan (via MoltenVK) from Homebrew; see tools/vulkan-env.sh for runtime.
 		includedirs { "/opt/homebrew/include" }
 		libdirs     { "/opt/homebrew/lib" }
 
