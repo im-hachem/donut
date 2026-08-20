@@ -2,6 +2,7 @@
 
 #include "rendering/renderer.h"
 #include "settings_manager.h"
+#include "hdri_manager.h"
 
 #include "states/simulation_state.h"
 #include "states/config_state.h"
@@ -80,15 +81,32 @@ namespace Donut
 
     auto Application::build_vulkan_ui() -> void
     {
-        // Placeholder UI proving the ImGui Vulkan backend renders. The real
-        // application UI (states' on_im_ui_render) moves here once the scene is
-        // ported to Vulkan (B-3).
         ImGui::Begin("Donut - Vulkan backend");
         ImGui::Text("Geodesic black hole through Vulkan (MoltenVK).");
         ImGui::Text("%.1f FPS", ImGui::GetIO().Framerate);
         ImGui::Separator();
-        ImGui::TextWrapped("Drag to orbit, scroll to zoom. HDRI starfield is live; "
-                           "next is porting the simulation UI to Vulkan.");
+
+        if (m_vulkan_renderer)
+        {
+            auto& hdri = HDRIManager::get();
+            std::string current = m_vulkan_renderer->current_hdri();
+            std::string preview = hdri.get_hdri_name(current);
+            if (ImGui::BeginCombo("HDRI", preview.c_str()))
+            {
+                for (const auto& path : hdri.get_available_hdri())
+                {
+                    bool selected = (path == current);
+                    if (ImGui::Selectable(hdri.get_hdri_name(path).c_str(), selected))
+                        m_vulkan_renderer->set_hdri(path);
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("Switching rebuilds the cubemap (brief pause).");
+        }
+
+        ImGui::Separator();
+        ImGui::TextWrapped("Drag to orbit, scroll to zoom.");
         ImGui::End();
     }
 

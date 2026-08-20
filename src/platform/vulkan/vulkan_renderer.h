@@ -2,6 +2,7 @@
 
 #include <glm/glm.hpp>
 #include <functional>
+#include <string>
 
 // Live-window Vulkan backend: owns the instance, surface, device, swapchain,
 // render pass, framebuffers and per-frame synchronization, and drives the
@@ -32,6 +33,14 @@ namespace Donut
         auto draw_frame(const glm::vec4& clearColor, const std::function<void()>& buildUI = {}) -> void;
 
         auto on_resize(int width, int height) -> void;
+
+        // Rebuilds the starfield environment cubemap from another equirect .hdr
+        // at runtime (device-idle teardown + rebuild + descriptor rewrite).
+        // No-op if path is already the active HDRI.
+        auto set_hdri(const std::string& path) -> void;
+
+        // Filesystem path of the HDRI currently backing the cubemap.
+        auto current_hdri() const -> const std::string&;
 
     private:
         struct Impl;

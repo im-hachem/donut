@@ -99,6 +99,7 @@ namespace Donut
         bool left_was_down = false;
         VkImage cube_image = VK_NULL_HANDLE; VkDeviceMemory cube_mem = VK_NULL_HANDLE;
         VkImageView cube_view = VK_NULL_HANDLE; VkSampler cube_sampler = VK_NULL_HANDLE;
+        std::string hdri_path;  // path backing the current cubemap (UI display + no-op switch guard)
         VkDescriptorSetLayout geo_set_layout = VK_NULL_HANDLE;
         VkDescriptorPool geo_pool = VK_NULL_HANDLE;
         VkDescriptorSet geo_set = VK_NULL_HANDLE;
@@ -132,6 +133,7 @@ namespace Donut
         auto create_sync_objects() -> bool;
         auto create_geodesic_resources() -> bool;
         auto create_hdri_cubemap(const char* path) -> bool;
+        auto rebuild_hdri_cubemap(const char* path) -> void;
         auto create_present_resources() -> bool;
         auto process_input() -> void;
         auto update_geodesic_uniforms() -> void;
@@ -601,6 +603,7 @@ namespace Donut
 
     auto VulkanRenderer::Impl::create_hdri_cubemap(const char* path) -> bool
     {
+        hdri_path = path;
         const VkMemoryPropertyFlags host_vis = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         const uint32_t FACE = 1024;
         const VkFormat cube_fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
@@ -843,6 +846,28 @@ namespace Donut
         vkDestroyBuffer(device, eq_staging, nullptr); vkFreeMemory(device, eq_staging_mem, nullptr);
         DONUT_INFO("Vulkan: HDRI cubemap built from {} ({}x{} equirect -> {}^2 cube)", path, w, h, (int)FACE);
         return true;
+    }
+
+    // Runtime HDRI switch: drain the device, tear down the old cubemap, build the
+    // new one, and repoint the geodesic set's samplerCube (binding 4) at it.
+    auto VulkanRenderer::Impl::rebuild_hdri_cubemap(const char* path) -> void
+    {
+        vkDeviceWaitIdle(device);
+
+        if (cube_sampler) vkDestroySampler(device, cube_sampler, nullptr);
+        if (cube_view)    vkDestroyImageView(device, cube_view, nullptr);
+        if (cube_image)   vkDestroyImage(device, cube_image, nullptr);
+        if (cube_mem)     vkFreeMemory(device, cube_mem, nullptr);
+        cube_sampler = VK_NULL_HANDLE; cube_view = VK_NULL_HANDLE;
+        cube_image   = VK_NULL_HANDLE; cube_mem  = VK_NULL_HANDLE;
+
+        create_hdri_cubemap(path);
+
+        VkDescriptorImageInfo cube_info{ cube_sampler, cube_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+        write.dstSet = geo_set; write.dstBinding = 4; write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &cube_info;
+        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
     }
 
     auto VulkanRenderer::Impl::create_present_resources() -> bool
@@ -1136,6 +1161,19 @@ namespace Donut
     {
         m_impl->framebuffer_resized = true;
         m_impl->width = width; m_impl->height = height;
+    }
+
+    auto VulkanRenderer::set_hdri(const std::string& path) -> void
+    {
+        Impl& v = *m_impl;
+        if (v.device == VK_NULL_HANDLE || v.geo_set == VK_NULL_HANDLE) return;
+        if (v.hdri_path == path) return;
+        v.rebuild_hdri_cubemap(path.c_str());
+    }
+
+    auto VulkanRenderer::current_hdri() const -> const std::string&
+    {
+        return m_impl->hdri_path;
     }
 
     auto VulkanRenderer::draw_frame(const glm::vec4& clear_color, const std::function<void()>& build_ui) -> void
