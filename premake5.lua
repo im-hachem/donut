@@ -318,10 +318,6 @@ project "Donut"
 
 		"src/**.h",
 		"src/**.cpp",
-		"src/rendering/framebuffer.h",
-		"src/rendering/framebuffer.cpp",
-		"src/platform/opengl/opengl_framebuffer.h",
-		"src/platform/opengl/opengl_framebuffer.cpp",
 
 		"ext/imgui/backends/imgui_impl_glfw.cpp",
 		"ext/imgui/backends/imgui_impl_opengl3.cpp",

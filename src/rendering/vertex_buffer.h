@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <vector>
 
-namespace Donut 
+namespace Donut
 {
-    struct VertexBufferElement 
+    struct VertexBufferElement
     {
         uint32_t type;
         uint32_t count;
@@ -22,27 +22,27 @@ namespace Donut
         ~VertexBufferLayout() = default;
 
         template<typename T>
-        auto push(uint32_t count) -> void 
+        auto push(uint32_t count) -> void
         {
             static_assert(false);
         }
 
         template<>
-        void push<float>(uint32_t count) 
+        void push<float>(uint32_t count)
         {
             m_elements.push_back({ 0x1406, count, 0, m_stride }); // GL_FLOAT
             m_stride += count * VertexBufferElement::get_size_of_type(0x1406);
         }
 
         template<>
-        void push<uint32_t>(uint32_t count) 
+        void push<uint32_t>(uint32_t count)
         {
             m_elements.push_back({ 0x1405, count, 0, m_stride }); // GL_UNSIGNED_INT
             m_stride += count * VertexBufferElement::get_size_of_type(0x1405);
         }
 
         template<>
-        void push<uint8_t>(uint32_t count) 
+        void push<uint8_t>(uint32_t count)
         {
             m_elements.push_back({ 0x1401, count, 1, m_stride }); // GL_UNSIGNED_BYTE
             m_stride += count * VertexBufferElement::get_size_of_type(0x1401);
@@ -59,15 +59,20 @@ namespace Donut
     class VertexBuffer
     {
     public:
-        virtual ~VertexBuffer() = default;
+        VertexBuffer(const void* data, uint32_t size);
+        ~VertexBuffer();
 
-        virtual auto bind() const -> void = 0;
-        virtual auto unbind() const -> void = 0;
-        virtual auto set_data(const void* data, uint32_t size) -> void = 0;
+        auto bind() const -> void;
+        auto unbind() const -> void;
+        auto set_data(const void* data, uint32_t size) -> void;
 
-        virtual auto get_layout() const -> const VertexBufferLayout& = 0;
-        virtual auto set_layout(const VertexBufferLayout& layout) -> void = 0;
+        auto get_layout() const -> const VertexBufferLayout& { return m_layout; }
+        auto set_layout(const VertexBufferLayout& layout) -> void { m_layout = layout; }
 
         static auto create(const void* data, uint32_t size) -> VertexBuffer*;
+
+    private:
+        uint32_t           m_renderer_id = 0;
+        VertexBufferLayout m_layout;
     };
 };

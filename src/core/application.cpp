@@ -88,30 +88,45 @@ namespace Donut
 
         if (m_vulkan_renderer)
         {
-            bool free_fly = m_vulkan_renderer->is_free_fly();
-            ImGui::Text("Camera");
-            if (ImGui::RadioButton("Orbital", !free_fly))  m_vulkan_renderer->set_free_fly(false);
+            bool scene = m_vulkan_renderer->is_scene_mode();
+            ImGui::Text("View");
+            if (ImGui::RadioButton("Black hole", !scene)) m_vulkan_renderer->set_scene_mode(false);
             ImGui::SameLine();
-            if (ImGui::RadioButton("Free-fly", free_fly))  m_vulkan_renderer->set_free_fly(true);
-            ImGui::TextDisabled(free_fly ? "WASD move | Q/E down-up | Shift boost | drag to look"
-                                         : "Drag to orbit | scroll to zoom");
+            if (ImGui::RadioButton("Scene", scene))       m_vulkan_renderer->set_scene_mode(true);
             ImGui::Separator();
 
-            auto& hdri = HDRIManager::get();
-            std::string current = m_vulkan_renderer->current_hdri();
-            std::string preview = hdri.get_hdri_name(current);
-            if (ImGui::BeginCombo("HDRI", preview.c_str()))
+            if (scene)
             {
-                for (const auto& path : hdri.get_available_hdri())
-                {
-                    bool selected = (path == current);
-                    if (ImGui::Selectable(hdri.get_hdri_name(path).c_str(), selected))
-                        m_vulkan_renderer->set_hdri(path);
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
+                ImGui::TextDisabled("World-builder scene (grid). Drag to orbit, scroll to zoom.");
+                ImGui::TextDisabled("Lit sphere + skybox coming next.");
             }
-            ImGui::TextDisabled("Switching rebuilds the cubemap (brief pause).");
+            else
+            {
+                bool free_fly = m_vulkan_renderer->is_free_fly();
+                ImGui::Text("Camera");
+                if (ImGui::RadioButton("Orbital", !free_fly))  m_vulkan_renderer->set_free_fly(false);
+                ImGui::SameLine();
+                if (ImGui::RadioButton("Free-fly", free_fly))  m_vulkan_renderer->set_free_fly(true);
+                ImGui::TextDisabled(free_fly ? "WASD move | Q/E down-up | Shift boost | drag to look"
+                                             : "Drag to orbit | scroll to zoom");
+                ImGui::Separator();
+
+                auto& hdri = HDRIManager::get();
+                std::string current = m_vulkan_renderer->current_hdri();
+                std::string preview = hdri.get_hdri_name(current);
+                if (ImGui::BeginCombo("HDRI", preview.c_str()))
+                {
+                    for (const auto& path : hdri.get_available_hdri())
+                    {
+                        bool selected = (path == current);
+                        if (ImGui::Selectable(hdri.get_hdri_name(path).c_str(), selected))
+                            m_vulkan_renderer->set_hdri(path);
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("Switching rebuilds the cubemap (brief pause).");
+            }
         }
 
         ImGui::End();

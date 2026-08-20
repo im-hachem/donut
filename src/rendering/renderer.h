@@ -9,6 +9,8 @@
 
 namespace Donut
 {
+    // Single concrete backend: the OpenGL renderer. (Vulkan runs through its own
+    // dedicated VulkanRenderer, not this immediate-mode command layer.)
     class RendererAPI
     {
     public:
@@ -20,31 +22,26 @@ namespace Donut
         };
 
     public:
-        virtual ~RendererAPI() = default;
+        RendererAPI()  = default;
+        ~RendererAPI() = default;
 
-        virtual auto init() -> void                                                = 0;
-        virtual auto set_viewport(uint32_t x, uint32_t y,
-                                  uint32_t width, uint32_t height) -> void          = 0;
-        virtual auto set_clear_color(const glm::vec4& color) -> void                = 0;
-        virtual auto clear() -> void                                               = 0;
-        virtual auto enable_depth_test() -> void                                   = 0;
-        virtual auto disable_depth_test() -> void                                  = 0;
-        virtual auto set_face_culling(bool enabled) -> void                        = 0;
-        virtual auto enable_blending() -> void                                     = 0;
-        virtual auto disable_blending() -> void                                    = 0;
+        auto init() -> void;
+        auto set_viewport(uint32_t x, uint32_t y, uint32_t width, uint32_t height) -> void;
+        auto set_clear_color(const glm::vec4& color) -> void;
+        auto clear() -> void;
+        auto enable_depth_test() -> void;
+        auto disable_depth_test() -> void;
+        auto set_face_culling(bool enabled) -> void;
+        auto enable_blending() -> void;
+        auto disable_blending() -> void;
 
-        virtual auto draw_indexed(const Ref<VertexArray>& vertex_array,
-                                  uint32_t index_count = 0) -> void                 = 0;
-
-        virtual auto draw_arrays(uint32_t vertex_count, uint32_t first = 0) -> void = 0;
-        virtual auto draw_lines(const Ref<VertexArray>& vertex_array,
-                                uint32_t index_count = 0) -> void                   = 0;
-        virtual auto bind_texture(uint32_t texture_id, uint32_t slot = 0) -> void   = 0;
-        virtual auto bind_image_texture(uint32_t texture_id,
-                                        uint32_t slot = 0,
-                                        bool read_only = false) -> void             = 0;
-        virtual auto read_pixels(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
-                                 uint32_t format, uint32_t type, void* pixels) -> void = 0;
+        auto draw_indexed(const Ref<VertexArray>& vertex_array, uint32_t index_count = 0) -> void;
+        auto draw_arrays(uint32_t vertex_count, uint32_t first = 0) -> void;
+        auto draw_lines(const Ref<VertexArray>& vertex_array, uint32_t index_count = 0) -> void;
+        auto bind_texture(uint32_t texture_id, uint32_t slot = 0) -> void;
+        auto bind_image_texture(uint32_t texture_id, uint32_t slot = 0, bool read_only = false) -> void;
+        auto read_pixels(uint32_t x, uint32_t y, uint32_t width, uint32_t height,
+                         uint32_t format, uint32_t type, void* pixels) -> void;
 
         inline static auto get_api() -> API         { return s_api; }
         inline static auto set_api(API api) -> void { s_api = api;  }

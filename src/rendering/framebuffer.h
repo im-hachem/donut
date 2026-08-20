@@ -3,17 +3,19 @@
 #include "core/memory.h"
 #include "texture.h"
 
+#include <vector>
+
 namespace Donut
 {
     enum class FramebufferTextureFormat
     {
         None = 0,
-        
+
         RGBA8,
         RED_INTEGER,
-        
+
         DEPTH24STENCIL8,
-        
+
         Depth = DEPTH24STENCIL8
     };
 
@@ -47,19 +49,32 @@ namespace Donut
     class Framebuffer
     {
     public:
-        virtual ~Framebuffer() = default;
+        Framebuffer(const FramebufferSpecification& spec);
+        ~Framebuffer();
 
-        virtual auto bind() -> void = 0;
-        virtual auto unbind() -> void = 0;
+        auto bind() -> void;
+        auto unbind() -> void;
 
-        virtual auto resize(uint32_t width, uint32_t height) -> void = 0;
-        virtual auto read_pixel(uint32_t attachment_index, int x, int y) -> int = 0;
+        auto resize(uint32_t width, uint32_t height) -> void;
+        auto read_pixel(uint32_t attachment_index, int x, int y) -> int;
 
-        virtual auto clear_attachment(uint32_t attachment_index, int value) -> void = 0;
-        virtual auto get_color_attachment_renderer_id(uint32_t index = 0) const -> uint32_t = 0;
+        auto clear_attachment(uint32_t attachment_index, int value) -> void;
+        auto get_color_attachment_renderer_id(uint32_t index = 0) const -> uint32_t { return m_color_attachments[index]; }
 
-        virtual auto get_specification() const -> const FramebufferSpecification& = 0;
+        auto get_specification() const -> const FramebufferSpecification& { return m_specification; }
 
         static auto create(const FramebufferSpecification& spec) -> Ref<Framebuffer>;
+
+    private:
+        auto invalidate() -> void;
+
+        uint32_t m_renderer_id = 0;
+        FramebufferSpecification m_specification;
+
+        std::vector<FramebufferTextureSpecification> m_color_attachment_specifications;
+        FramebufferTextureSpecification m_depth_attachment_specification = FramebufferTextureFormat::None;
+
+        std::vector<uint32_t> m_color_attachments;
+        uint32_t m_depth_attachment = 0;
     };
 };

@@ -121,6 +121,20 @@ namespace Donut
         VkPipelineLayout present_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline present_pipeline = VK_NULL_HANDLE;
 
+        // World-builder scene view (grid now; sphere/skybox next). Normal-scale
+        // orbital camera; geometry drawn straight into the swapchain render pass.
+        bool scene_mode = false;
+        Camera scene_camera{ 45.0f, (float)GEO_W / (float)GEO_H, 0.1f, 1000.0f };
+        VkBuffer grid_vb = VK_NULL_HANDLE; VkDeviceMemory grid_vb_mem = VK_NULL_HANDLE;
+        uint32_t grid_vertex_count = 0;
+        VkBuffer grid_ubo = VK_NULL_HANDLE; VkDeviceMemory grid_ubo_mem = VK_NULL_HANDLE;
+        void* grid_ubo_mapped = nullptr;
+        VkDescriptorSetLayout grid_set_layout = VK_NULL_HANDLE;
+        VkDescriptorPool grid_pool = VK_NULL_HANDLE;
+        VkDescriptorSet grid_set = VK_NULL_HANDLE;
+        VkPipelineLayout grid_pipeline_layout = VK_NULL_HANDLE;
+        VkPipeline grid_pipeline = VK_NULL_HANDLE;
+
         auto find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags flags) const -> uint32_t;
         auto create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buf, VkDeviceMemory& mem) const -> bool;
         static auto load_spirv(const std::string& path) -> std::vector<uint32_t>;
@@ -138,8 +152,10 @@ namespace Donut
         auto create_hdri_cubemap(const char* path) -> bool;
         auto rebuild_hdri_cubemap(const char* path) -> void;
         auto create_present_resources() -> bool;
+        auto create_scene_resources() -> bool;
         auto process_input() -> void;
         auto update_geodesic_uniforms() -> void;
+        auto update_scene_uniforms() -> void;
         auto destroy_geodesic_resources() -> void;
         auto recreate_swapchain() -> bool;
         auto cleanup_swapchain() -> void;
@@ -931,6 +947,120 @@ namespace Donut
         return true;
     }
 
+    auto VulkanRenderer::Impl::create_scene_resources() -> bool
+    {
+        const VkMemoryPropertyFlags host_vis = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+        // Scene camera: normal-scale orbital viewer (matches the OpenGL world-builder).
+        scene_camera.set_camera_mode(CameraMode::Orbital);
+        scene_camera.set_orbital_target(glm::vec3(0.0f));
+        scene_camera.set_orbital_radius(15.0);
+        scene_camera.set_orbital_limits(2.0, 200.0);
+        scene_camera.set_orbital_speed(0.01f);
+        scene_camera.set_zoom_speed(2.0);
+        scene_camera.set_azimuth(0.0f);
+        scene_camera.set_elevation((float)std::numbers::pi / 3.0f);
+        scene_camera.update_orbital();
+
+        // Line grid on the XZ plane (+/-50 units, 1-unit cells). Grid.slang scales
+        // the position by u_GridSize/50, so u_GridSize = 50 keeps it 1:1.
+        std::vector<glm::vec3> lines;
+        const int N = 50;
+        for (int i = -N; i <= N; ++i)
+        {
+            lines.push_back({ (float)i, 0.0f, (float)-N });
+            lines.push_back({ (float)i, 0.0f, (float) N });
+            lines.push_back({ (float)-N, 0.0f, (float)i });
+            lines.push_back({ (float) N, 0.0f, (float)i });
+        }
+        grid_vertex_count = (uint32_t)lines.size();
+        VkDeviceSize vbsize = lines.size() * sizeof(glm::vec3);
+        if (!create_buffer(vbsize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, host_vis, grid_vb, grid_vb_mem)) return false;
+        void* mp = nullptr; vkMapMemory(device, grid_vb_mem, 0, vbsize, 0, &mp); memcpy(mp, lines.data(), vbsize); vkUnmapMemory(device, grid_vb_mem);
+
+        // $Globals UBO (set 0, binding 0), std140, 176 bytes; refilled each frame.
+        if (!create_buffer(176, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, grid_ubo, grid_ubo_mem)) return false;
+        vkMapMemory(device, grid_ubo_mem, 0, 176, 0, &grid_ubo_mapped);
+
+        VkDescriptorSetLayoutBinding b{}; b.binding = 0; b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; b.descriptorCount = 1; b.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO }; dslci.bindingCount = 1; dslci.pBindings = &b;
+        VK_CHECK(vkCreateDescriptorSetLayout(device, &dslci, nullptr, &grid_set_layout));
+        VkDescriptorPoolSize psize{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 };
+        VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO }; dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psize;
+        VK_CHECK(vkCreateDescriptorPool(device, &dpci, nullptr, &grid_pool));
+        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO }; dsai.descriptorPool = grid_pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &grid_set_layout;
+        VK_CHECK(vkAllocateDescriptorSets(device, &dsai, &grid_set));
+        VkDescriptorBufferInfo bi{ grid_ubo, 0, VK_WHOLE_SIZE };
+        VkWriteDescriptorSet w{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET }; w.dstSet = grid_set; w.dstBinding = 0; w.descriptorCount = 1; w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; w.pBufferInfo = &bi;
+        vkUpdateDescriptorSets(device, 1, &w, 0, nullptr);
+
+        VkShaderModule vmod, fmod;
+        if (!create_shader_module("assets/shaders/generated/Grid.vertexMain.spv", vmod)) return false;
+        if (!create_shader_module("assets/shaders/generated/Grid.fragmentMain.spv", fmod)) return false;
+        VkPipelineLayoutCreateInfo plci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO }; plci.setLayoutCount = 1; plci.pSetLayouts = &grid_set_layout;
+        VK_CHECK(vkCreatePipelineLayout(device, &plci, nullptr, &grid_pipeline_layout));
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   stages[0].module = vmod; stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stages[1].module = fmod; stages[1].pName = "main";
+        VkVertexInputBindingDescription vib{ 0, sizeof(glm::vec3), VK_VERTEX_INPUT_RATE_VERTEX };
+        VkVertexInputAttributeDescription via{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+        VkPipelineVertexInputStateCreateInfo vin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vib;
+        vin.vertexAttributeDescriptionCount = 1; vin.pVertexAttributeDescriptions = &via;
+        VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO }; ia.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+        VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO }; vps.viewportCount = 1; vps.scissorCount = 1;
+        VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dsci{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; dsci.dynamicStateCount = 2; dsci.pDynamicStates = dyn;
+        VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO }; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState cba{};
+        cba.blendEnable = VK_TRUE;
+        cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; cba.colorBlendOp = VK_BLEND_OP_ADD;
+        cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE; cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO; cba.alphaBlendOp = VK_BLEND_OP_ADD;
+        cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO }; cb.attachmentCount = 1; cb.pAttachments = &cba;
+        VkGraphicsPipelineCreateInfo gpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+        gpci.stageCount = 2; gpci.pStages = stages;
+        gpci.pVertexInputState = &vin; gpci.pInputAssemblyState = &ia; gpci.pViewportState = &vps;
+        gpci.pDynamicState = &dsci;
+        gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pColorBlendState = &cb;
+        gpci.layout = grid_pipeline_layout; gpci.renderPass = render_pass; gpci.subpass = 0;
+        VkResult pr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &grid_pipeline);
+        vkDestroyShaderModule(device, vmod, nullptr); vkDestroyShaderModule(device, fmod, nullptr);
+        if (pr != VK_SUCCESS) { DONUT_ERROR("Vulkan: grid pipeline creation failed ({})", (int)pr); return false; }
+        DONUT_INFO("Vulkan: scene resources ready ({} grid verts)", grid_vertex_count);
+        return true;
+    }
+
+    auto VulkanRenderer::Impl::update_scene_uniforms() -> void
+    {
+        struct GridUBO {
+            glm::mat4 view_projection;    // 0    (SPIR-V RowMajor -> upload transposed)
+            glm::mat4 transform;          // 64
+            float grid_size; float p0[3]; // 128
+            glm::vec3 grid_color;         // 144
+            float grid_alpha;             // 156
+            glm::vec3 camera_pos;         // 160
+            float p1;                     // 172
+        } g{};
+        static_assert(sizeof(GridUBO) == 176, "GridUBO std140 layout mismatch");
+
+        uint32_t h = swapchain_extent.height ? swapchain_extent.height : 1;
+        float aspect = (float)swapchain_extent.width / (float)h;
+        scene_camera.set_projection(45.0f, aspect, 0.1f, 1000.0f);
+        glm::mat4 vp = scene_camera.get_projection_matrix() * scene_camera.get_view_matrix();
+
+        // Slang's mul(M,v) + the SPIR-V RowMajor decoration means glm's column-major
+        // matrices upload directly here (no transpose) to read as the intended M.
+        g.view_projection = vp;
+        g.transform       = glm::mat4(1.0f);
+        g.grid_size       = 50.0f;
+        g.grid_color      = glm::vec3(0.55f, 0.55f, 0.6f);
+        g.grid_alpha      = 0.75f;
+        g.camera_pos      = scene_camera.get_orbital_position();
+        if (grid_ubo_mapped) memcpy(grid_ubo_mapped, &g, sizeof(g));
+    }
+
     auto VulkanRenderer::Impl::update_geodesic_uniforms() -> void
     {
         struct CamUBO {
@@ -984,7 +1114,7 @@ namespace Donut
         glfwGetCursorPos(window, &mx, &my);
         bool left_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
-        if (camera.get_camera_mode() == CameraMode::FPS)
+        if (!scene_mode && camera.get_camera_mode() == CameraMode::FPS)
         {
             // Left-drag looks around (screen-up looks up); WASD/QE move.
             if (left_down && !left_was_down) { fps_last_x = mx; fps_last_y = my; }
@@ -1010,24 +1140,35 @@ namespace Donut
         }
         else
         {
+            Camera& cam = scene_mode ? scene_camera : camera;
             if (left_down && !left_was_down && !over_ui)
-                camera.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
+                cam.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
             else if (!left_down && left_was_down)
-                camera.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0);
+                cam.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0);
             left_was_down = left_down;
 
-            camera.process_orbital_mouse_move(mx, my);  // orbits only while dragging
+            cam.process_orbital_mouse_move(mx, my);  // orbits only while dragging
 
             double scroll = g_ScrollAccum; g_ScrollAccum = 0.0;
             if (scroll != 0.0 && !over_ui)
-                camera.process_orbital_scroll(0.0, scroll);
+                cam.process_orbital_scroll(0.0, scroll);
 
-            user_moving = camera.is_dragging() || camera.is_panning();
+            user_moving = cam.is_dragging() || cam.is_panning();
         }
     }
 
     auto VulkanRenderer::Impl::destroy_geodesic_resources() -> void
     {
+        if (grid_pipeline) vkDestroyPipeline(device, grid_pipeline, nullptr);
+        if (grid_pipeline_layout) vkDestroyPipelineLayout(device, grid_pipeline_layout, nullptr);
+        if (grid_pool) vkDestroyDescriptorPool(device, grid_pool, nullptr);
+        if (grid_set_layout) vkDestroyDescriptorSetLayout(device, grid_set_layout, nullptr);
+        if (grid_ubo_mapped) { vkUnmapMemory(device, grid_ubo_mem); grid_ubo_mapped = nullptr; }
+        if (grid_ubo) vkDestroyBuffer(device, grid_ubo, nullptr);
+        if (grid_ubo_mem) vkFreeMemory(device, grid_ubo_mem, nullptr);
+        if (grid_vb) vkDestroyBuffer(device, grid_vb, nullptr);
+        if (grid_vb_mem) vkFreeMemory(device, grid_vb_mem, nullptr);
+
         if (present_pipeline) vkDestroyPipeline(device, present_pipeline, nullptr);
         if (present_pipeline_layout) vkDestroyPipelineLayout(device, present_pipeline_layout, nullptr);
         if (present_pool) vkDestroyDescriptorPool(device, present_pool, nullptr);
@@ -1060,6 +1201,31 @@ namespace Donut
     {
         VkCommandBufferBeginInfo begin{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
         VK_CHECK(vkBeginCommandBuffer(cmd, &begin));
+
+        if (scene_mode)
+        {
+            // Scene view: grid lines drawn straight into the swapchain, then ImGui.
+            VkClearValue cv{}; cv.color = { { clear.r, clear.g, clear.b, clear.a } };
+            VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
+            rpbi.renderPass = render_pass; rpbi.framebuffer = framebuffers[image_index];
+            rpbi.renderArea = { { 0, 0 }, swapchain_extent };
+            rpbi.clearValueCount = 1; rpbi.pClearValues = &cv;
+            vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
+            // Negative-height viewport flips Y so the scene reads like the GL path.
+            VkViewport gvp{ 0, (float)swapchain_extent.height, (float)swapchain_extent.width, -(float)swapchain_extent.height, 0, 1 };
+            VkRect2D gsc{ { 0, 0 }, swapchain_extent };
+            vkCmdSetViewport(cmd, 0, 1, &gvp);
+            vkCmdSetScissor(cmd, 0, 1, &gsc);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline_layout, 0, 1, &grid_set, 0, nullptr);
+            VkDeviceSize goff = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &grid_vb, &goff);
+            vkCmdDraw(cmd, grid_vertex_count, 1, 0, 0);
+            if (draw_data)
+                ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+            vkCmdEndRenderPass(cmd);
+            VK_CHECK(vkEndCommandBuffer(cmd));
+            return true;
+        }
 
         // Geodesic offscreen pass
         VkClearValue geo_clear{}; geo_clear.color = { { 0, 0, 0, 1 } };
@@ -1153,6 +1319,7 @@ namespace Donut
         if (!v.create_sync_objects())     return false;
         if (!v.create_geodesic_resources()) return false;
         if (!v.create_present_resources())  return false;
+        if (!v.create_scene_resources())    return false;
 
         DONUT_INFO("Vulkan renderer ready: {} swapchain images, {}x{}",
                    (int)v.images.size(), v.swapchain_extent.width, v.swapchain_extent.height);
@@ -1253,6 +1420,16 @@ namespace Donut
         return m_impl->camera.get_camera_mode() == CameraMode::FPS;
     }
 
+    auto VulkanRenderer::set_scene_mode(bool enabled) -> void
+    {
+        if (m_impl) m_impl->scene_mode = enabled;
+    }
+
+    auto VulkanRenderer::is_scene_mode() const -> bool
+    {
+        return m_impl && m_impl->scene_mode;
+    }
+
     auto VulkanRenderer::draw_frame(const glm::vec4& clear_color, const std::function<void()>& build_ui) -> void
     {
         Impl& v = *m_impl;
@@ -1286,7 +1463,7 @@ namespace Donut
         if (v.geo_in_use != VK_NULL_HANDLE)
             vkWaitForFences(v.device, 1, &v.geo_in_use, VK_TRUE, UINT64_MAX);
         v.process_input();
-        v.update_geodesic_uniforms();
+        if (v.scene_mode) v.update_scene_uniforms(); else v.update_geodesic_uniforms();
 
         vkResetCommandBuffer(v.command_buffers[v.current_frame], 0);
         if (!v.record_command_buffer(v.command_buffers[v.current_frame], image_index, clear_color, draw_data)) return;

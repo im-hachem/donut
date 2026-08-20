@@ -47,6 +47,11 @@ namespace Donut
         auto set_free_fly(bool enabled) -> void;
         auto is_free_fly() const -> bool;
 
+        // Switch between the black-hole geodesic view and the world-builder scene
+        // view (grid/sphere/skybox drawn with real Vulkan geometry pipelines).
+        auto set_scene_mode(bool enabled) -> void;
+        auto is_scene_mode() const -> bool;
+
     private:
         struct Impl;
         Impl* m_impl = nullptr;

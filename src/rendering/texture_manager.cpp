@@ -1,13 +1,13 @@
 #include "texture_manager.h"
-#include "platform/opengl/opengl_texture.h"
-#include "platform/opengl/opengl_renderer_api.h"
+#include "renderer.h"
+
 #include <glad/glad.h>
 
 namespace Donut
 {
     auto TextureManager::create_texture(uint32_t width, uint32_t height) -> Ref<Texture2D>
     {
-        return create_ref<OpenGLTexture2D>(width, height);
+        return create_ref<Texture2D>(width, height);
     }
 
     auto TextureManager::bind_texture(uint32_t texture_id, uint32_t slot) -> void

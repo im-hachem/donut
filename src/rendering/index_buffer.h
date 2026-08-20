@@ -7,12 +7,17 @@ namespace Donut
     class IndexBuffer
     {
     public:
-        virtual ~IndexBuffer() = default;
+        IndexBuffer(const uint32_t* indices, uint32_t count);
+        ~IndexBuffer();
 
-        virtual auto bind() const -> void = 0;
-        virtual auto unbind() const -> void = 0;
-        virtual auto get_count() const -> uint32_t = 0;
+        auto bind() const -> void;
+        auto unbind() const -> void;
+        auto get_count() const -> uint32_t { return m_count; }
 
         static auto create(const uint32_t* indices, uint32_t count) -> IndexBuffer*;
+
+    private:
+        uint32_t m_renderer_id = 0;
+        uint32_t m_count = 0;
     };
 };
