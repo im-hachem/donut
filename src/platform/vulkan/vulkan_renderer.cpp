@@ -97,6 +97,9 @@ namespace Donut
         void* sim_mapped = nullptr;
         Camera camera{ 60.0f, (float)GEO_W / (float)GEO_H, 0.1f, 100.0f };
         bool left_was_down = false;
+        double last_frame_time = 0.0;               // for free-fly dt
+        double fps_last_x = 0.0, fps_last_y = 0.0;  // cursor tracking for free-fly look
+        bool user_moving = false;                   // camera moved/looked this frame (drives step count)
         VkImage cube_image = VK_NULL_HANDLE; VkDeviceMemory cube_mem = VK_NULL_HANDLE;
         VkImageView cube_view = VK_NULL_HANDLE; VkSampler cube_sampler = VK_NULL_HANDLE;
         std::string hdri_path;  // path backing the current cubemap (UI display + no-op switch guard)
@@ -935,13 +938,22 @@ namespace Donut
             glm::vec3 up; float p2; glm::vec3 fwd; float p3;
             float tan_half_fov; float aspect; uint32_t moving; int p4;
         } cam_data{};
-        glm::vec3 pos   = camera.get_orbital_position();
-        glm::vec3 fwd   = glm::normalize(camera.get_orbital_target() - pos);
+        glm::vec3 pos, fwd;
+        if (camera.get_camera_mode() == CameraMode::FPS)
+        {
+            pos = camera.get_position();
+            fwd = camera.get_forward_direction();
+        }
+        else
+        {
+            pos = camera.get_orbital_position();
+            fwd = glm::normalize(camera.get_orbital_target() - pos);
+        }
         glm::vec3 right = glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
         cam_data.pos = pos; cam_data.right = right; cam_data.up = glm::cross(right, fwd); cam_data.fwd = fwd;
         cam_data.tan_half_fov = (float)tan(glm::radians(60.0f * 0.5f));
         cam_data.aspect = (float)GEO_W / (float)GEO_H;
-        cam_data.moving = camera.is_dragging() || camera.is_panning() ? 1u : 0u;
+        cam_data.moving = user_moving ? 1u : 0u;
         if (cam_mapped) memcpy(cam_mapped, &cam_data, sizeof(cam_data));
 
         // Fewer integration steps while the camera moves keeps dragging responsive;
@@ -964,20 +976,54 @@ namespace Donut
     {
         bool over_ui = imgui_init && ImGui::GetIO().WantCaptureMouse;
 
-        bool left_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
-        if (left_down && !left_was_down && !over_ui)
-            camera.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
-        else if (!left_down && left_was_down)
-            camera.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0);
-        left_was_down = left_down;
+        double now = glfwGetTime();
+        float dt = last_frame_time > 0.0 ? (float)(now - last_frame_time) : 0.0f;
+        last_frame_time = now;
 
         double mx = 0, my = 0;
         glfwGetCursorPos(window, &mx, &my);
-        camera.process_orbital_mouse_move(mx, my);  // tracks last position internally; orbits only while dragging
+        bool left_down = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
 
-        double scroll = g_ScrollAccum; g_ScrollAccum = 0.0;
-        if (scroll != 0.0 && !over_ui)
-            camera.process_orbital_scroll(0.0, scroll);
+        if (camera.get_camera_mode() == CameraMode::FPS)
+        {
+            // Left-drag looks around (screen-up looks up); WASD/QE move.
+            if (left_down && !left_was_down) { fps_last_x = mx; fps_last_y = my; }
+            if (left_down && !over_ui)
+                camera.on_mouse_move(float(mx - fps_last_x), float(fps_last_y - my));
+            fps_last_x = mx; fps_last_y = my;
+            left_was_down = left_down;
+
+            bool over_kb = imgui_init && ImGui::GetIO().WantCaptureKeyboard;
+            bool moved = false;
+            if (!over_kb && dt > 0.0f)
+            {
+                float mdt = dt * (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ? 4.0f : 1.0f);
+                if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) { camera.move_forward(mdt);  moved = true; }
+                if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) { camera.move_backward(mdt); moved = true; }
+                if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) { camera.move_left(mdt);     moved = true; }
+                if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) { camera.move_right(mdt);    moved = true; }
+                if (glfwGetKey(window, GLFW_KEY_E) == GLFW_PRESS) { camera.move_up(mdt);       moved = true; }
+                if (glfwGetKey(window, GLFW_KEY_Q) == GLFW_PRESS) { camera.move_down(mdt);     moved = true; }
+            }
+            g_ScrollAccum = 0.0;  // scroll unused in free-fly
+            user_moving = moved || (left_down && !over_ui);
+        }
+        else
+        {
+            if (left_down && !left_was_down && !over_ui)
+                camera.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_PRESS, 0);
+            else if (!left_down && left_was_down)
+                camera.process_orbital_mouse_button(GLFW_MOUSE_BUTTON_LEFT, GLFW_RELEASE, 0);
+            left_was_down = left_down;
+
+            camera.process_orbital_mouse_move(mx, my);  // orbits only while dragging
+
+            double scroll = g_ScrollAccum; g_ScrollAccum = 0.0;
+            if (scroll != 0.0 && !over_ui)
+                camera.process_orbital_scroll(0.0, scroll);
+
+            user_moving = camera.is_dragging() || camera.is_panning();
+        }
     }
 
     auto VulkanRenderer::Impl::destroy_geodesic_resources() -> void
@@ -1174,6 +1220,37 @@ namespace Donut
     auto VulkanRenderer::current_hdri() const -> const std::string&
     {
         return m_impl->hdri_path;
+    }
+
+    auto VulkanRenderer::set_free_fly(bool enabled) -> void
+    {
+        Impl& v = *m_impl;
+        if (v.device == VK_NULL_HANDLE) return;
+        const bool is_fps = v.camera.get_camera_mode() == CameraMode::FPS;
+        if (enabled == is_fps) return;
+
+        if (enabled)
+        {
+            // Seed the fly pose from the current orbital framing so the view is continuous.
+            glm::vec3 pos = v.camera.get_orbital_position();
+            glm::vec3 fwd = glm::normalize(v.camera.get_orbital_target() - pos);
+            float pitch = glm::degrees(asin(glm::clamp(fwd.y, -1.0f, 1.0f)));
+            float yaw   = glm::degrees(atan2(fwd.z, fwd.x));
+            v.camera.set_camera_mode(CameraMode::FPS);
+            v.camera.set_movement_speed(2.0e10f);   // scene spans ~1e11 units
+            v.camera.set_mouse_sensitivity(0.15f);
+            v.camera.set_position(pos);
+            v.camera.set_rotation(glm::vec3(pitch, yaw, 0.0f));
+        }
+        else
+        {
+            v.camera.set_camera_mode(CameraMode::Orbital);  // orbital state was left intact
+        }
+    }
+
+    auto VulkanRenderer::is_free_fly() const -> bool
+    {
+        return m_impl->camera.get_camera_mode() == CameraMode::FPS;
     }
 
     auto VulkanRenderer::draw_frame(const glm::vec4& clear_color, const std::function<void()>& build_ui) -> void

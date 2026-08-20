@@ -88,6 +88,15 @@ namespace Donut
 
         if (m_vulkan_renderer)
         {
+            bool free_fly = m_vulkan_renderer->is_free_fly();
+            ImGui::Text("Camera");
+            if (ImGui::RadioButton("Orbital", !free_fly))  m_vulkan_renderer->set_free_fly(false);
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Free-fly", free_fly))  m_vulkan_renderer->set_free_fly(true);
+            ImGui::TextDisabled(free_fly ? "WASD move | Q/E down-up | Shift boost | drag to look"
+                                         : "Drag to orbit | scroll to zoom");
+            ImGui::Separator();
+
             auto& hdri = HDRIManager::get();
             std::string current = m_vulkan_renderer->current_hdri();
             std::string preview = hdri.get_hdri_name(current);
@@ -105,8 +114,6 @@ namespace Donut
             ImGui::TextDisabled("Switching rebuilds the cubemap (brief pause).");
         }
 
-        ImGui::Separator();
-        ImGui::TextWrapped("Drag to orbit, scroll to zoom.");
         ImGui::End();
     }
 

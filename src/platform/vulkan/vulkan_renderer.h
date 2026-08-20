@@ -42,6 +42,11 @@ namespace Donut
         // Filesystem path of the HDRI currently backing the cubemap.
         auto current_hdri() const -> const std::string&;
 
+        // Free-fly (WASD + mouse-look) camera vs the default orbital camera.
+        // Enabling seeds the fly pose from the current orbital framing (no jump).
+        auto set_free_fly(bool enabled) -> void;
+        auto is_free_fly() const -> bool;
+
     private:
         struct Impl;
         Impl* m_impl = nullptr;
