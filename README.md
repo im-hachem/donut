@@ -1,27 +1,5 @@
-![Logo](branding/Logo-Black.jpg)
+![Logo](branding/Logo-Monochrome-White.jpg)
 A real-time black hole ray tracer.
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Mathematical Theory](docs/mathematical-theory.md)
-   - [Einstein's Field Equations](docs/mathematical-theory.md#einsteins-field-equations)
-   - [Schwarzschild Metric](docs/mathematical-theory.md#schwarzschild-metric)
-   - [Geodesics: Paths of Free-Falling Particles and Light](docs/mathematical-theory.md#geodesics-paths-of-free-falling-particles-and-light)
-   - [Conserved Quantities](docs/mathematical-theory.md#conserved-quantities)
-3. [Ray Tracing Implementation](docs/ray-tracing-implementation.md)
-   - [Ray Initialization](docs/ray-tracing-implementation.md#1-ray-initialization)
-   - [Geodesic Integration](docs/ray-tracing-implementation.md#2-geodesic-integration)
-   - [Intersection Testing](docs/ray-tracing-implementation.md#3-intersection-testing)
-   - [Rendering Pipeline](docs/ray-tracing-implementation.md#4-rendering)
-4. [Numerical Methods](docs/numerical-methods.md)
-   - [Runge-Kutta 4 Integration](docs/numerical-methods.md#runge-kutta-4-rk4-integration--explained)
-   - [Adaptive Step Size](docs/numerical-methods.md#adaptive-step-size)
-   - [Performance Optimizations](docs/numerical-methods.md#performance-optimizations)
-5. [Configuration](docs/configuration.md)
-   - [Configuration Files](docs/configuration.md#configuration-files)
-   - [Simulation Parameters](docs/configuration.md#simulation-parameters)
-   - [Performance Settings](docs/configuration.md#performance-settings)
 
 ## Overview
 
@@ -29,8 +7,8 @@ Donut is a real-time black hole ray tracer that simulates the visual effects of 
 
 ## Screenshots
 
-![Black Hole with Accretion Disk](Branding/Screenshot1.png)
-![Black hole with HDRI](Branding/Screenshot2.png)
+![Black Hole with Accretion Disk](branding/Screenshot1.png)
+![Black hole with HDRI](branding/Screenshot2.png)
 
 *Real-time rendering of Sagittarius A* with volumetric accretion disk, featuring:*
 

@@ -21,13 +21,13 @@
 
 namespace Donut
 {
-    #define VK_CHECK(expr)                                                     \
-        do {                                                                   \
-            VkResult _r = (expr);                                              \
-            if (_r != VK_SUCCESS) {                                            \
-                DONUT_ERROR("Vulkan: {} failed ({})", #expr, (int)_r);         \
-                return false;                                                  \
-            }                                                                  \
+    #define VK_CHECK(expr)                                             \
+        do {                                                           \
+            VkResult _r = (expr);                                      \
+            if (_r != VK_SUCCESS) {                                    \
+                DONUT_ERROR("Vulkan: {} failed ({})", #expr, (int)_r); \
+                return false;                                          \
+            }                                                          \
         } while (0)
 
     static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
@@ -135,6 +135,26 @@ namespace Donut
         VkPipelineLayout grid_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline grid_pipeline = VK_NULL_HANDLE;
 
+        // Scene color+depth pass into the swapchain (the grid is coplanar, but the
+        // sphere needs real depth). Depth image + framebuffers track the swapchain.
+        VkImage scene_depth_image = VK_NULL_HANDLE; VkDeviceMemory scene_depth_mem = VK_NULL_HANDLE;
+        VkImageView scene_depth_view = VK_NULL_HANDLE;
+        VkRenderPass scene_render_pass = VK_NULL_HANDLE;
+        std::vector<VkFramebuffer> scene_framebuffers;
+
+        // Lit sphere (Sphere.slang): pos+normal indexed mesh; samples the HDRI
+        // cubemap for ambient at binding 1 (shares the geodesic cube).
+        VkBuffer sphere_vb = VK_NULL_HANDLE; VkDeviceMemory sphere_vb_mem = VK_NULL_HANDLE;
+        VkBuffer sphere_ib = VK_NULL_HANDLE; VkDeviceMemory sphere_ib_mem = VK_NULL_HANDLE;
+        uint32_t sphere_index_count = 0;
+        VkBuffer sphere_ubo = VK_NULL_HANDLE; VkDeviceMemory sphere_ubo_mem = VK_NULL_HANDLE;
+        void* sphere_ubo_mapped = nullptr;
+        VkDescriptorSetLayout sphere_set_layout = VK_NULL_HANDLE;
+        VkDescriptorPool sphere_pool = VK_NULL_HANDLE;
+        VkDescriptorSet sphere_set = VK_NULL_HANDLE;
+        VkPipelineLayout sphere_pipeline_layout = VK_NULL_HANDLE;
+        VkPipeline sphere_pipeline = VK_NULL_HANDLE;
+
         auto find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags flags) const -> uint32_t;
         auto create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buf, VkDeviceMemory& mem) const -> bool;
         static auto load_spirv(const std::string& path) -> std::vector<uint32_t>;
@@ -153,6 +173,8 @@ namespace Donut
         auto rebuild_hdri_cubemap(const char* path) -> void;
         auto create_present_resources() -> bool;
         auto create_scene_resources() -> bool;
+        auto create_scene_targets() -> bool;
+        auto destroy_scene_targets() -> void;
         auto process_input() -> void;
         auto update_geodesic_uniforms() -> void;
         auto update_scene_uniforms() -> void;
@@ -398,6 +420,74 @@ namespace Donut
             VK_CHECK(vkCreateFramebuffer(device, &fbci, nullptr, &framebuffers[i]));
         }
         return true;
+    }
+
+    // Depth image + a color+depth render pass + per-image framebuffers for the
+    // scene view. Swapchain-sized, so recreated alongside the swapchain.
+    auto VulkanRenderer::Impl::create_scene_targets() -> bool
+    {
+        const VkFormat depth_fmt = VK_FORMAT_D32_SFLOAT;
+
+        VkImageCreateInfo dici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        dici.imageType = VK_IMAGE_TYPE_2D; dici.format = depth_fmt;
+        dici.extent = { swapchain_extent.width, swapchain_extent.height, 1 };
+        dici.mipLevels = 1; dici.arrayLayers = 1; dici.samples = VK_SAMPLE_COUNT_1_BIT;
+        dici.tiling = VK_IMAGE_TILING_OPTIMAL; dici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        VK_CHECK(vkCreateImage(device, &dici, nullptr, &scene_depth_image));
+        VkMemoryRequirements dreq{}; vkGetImageMemoryRequirements(device, scene_depth_image, &dreq);
+        VkMemoryAllocateInfo dai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        dai.allocationSize = dreq.size; dai.memoryTypeIndex = find_memory_type(dreq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VK_CHECK(vkAllocateMemory(device, &dai, nullptr, &scene_depth_mem));
+        VK_CHECK(vkBindImageMemory(device, scene_depth_image, scene_depth_mem, 0));
+        VkImageViewCreateInfo dvci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        dvci.image = scene_depth_image; dvci.viewType = VK_IMAGE_VIEW_TYPE_2D; dvci.format = depth_fmt;
+        dvci.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+        VK_CHECK(vkCreateImageView(device, &dvci, nullptr, &scene_depth_view));
+
+        VkAttachmentDescription atts[2]{};
+        atts[0].format = swapchain_format; atts[0].samples = VK_SAMPLE_COUNT_1_BIT;
+        atts[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        atts[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        atts[1].format = depth_fmt; atts[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        atts[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; atts[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; atts[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        atts[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED; atts[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference color_ref{ 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkAttachmentReference depth_ref{ 1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription subpass{}; subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1; subpass.pColorAttachments = &color_ref; subpass.pDepthStencilAttachment = &depth_ref;
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL; dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dep.srcAccessMask = 0;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        VkRenderPassCreateInfo rpci{ VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO };
+        rpci.attachmentCount = 2; rpci.pAttachments = atts; rpci.subpassCount = 1; rpci.pSubpasses = &subpass;
+        rpci.dependencyCount = 1; rpci.pDependencies = &dep;
+        VK_CHECK(vkCreateRenderPass(device, &rpci, nullptr, &scene_render_pass));
+
+        scene_framebuffers.resize(image_views.size());
+        for (size_t i = 0; i < image_views.size(); ++i)
+        {
+            VkImageView att[2] = { image_views[i], scene_depth_view };
+            VkFramebufferCreateInfo fbci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+            fbci.renderPass = scene_render_pass; fbci.attachmentCount = 2; fbci.pAttachments = att;
+            fbci.width = swapchain_extent.width; fbci.height = swapchain_extent.height; fbci.layers = 1;
+            VK_CHECK(vkCreateFramebuffer(device, &fbci, nullptr, &scene_framebuffers[i]));
+        }
+        return true;
+    }
+
+    auto VulkanRenderer::Impl::destroy_scene_targets() -> void
+    {
+        for (auto fb : scene_framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
+        scene_framebuffers.clear();
+        if (scene_render_pass) { vkDestroyRenderPass(device, scene_render_pass, nullptr); scene_render_pass = VK_NULL_HANDLE; }
+        if (scene_depth_view)  { vkDestroyImageView(device, scene_depth_view, nullptr); scene_depth_view = VK_NULL_HANDLE; }
+        if (scene_depth_image) { vkDestroyImage(device, scene_depth_image, nullptr); scene_depth_image = VK_NULL_HANDLE; }
+        if (scene_depth_mem)   { vkFreeMemory(device, scene_depth_mem, nullptr); scene_depth_mem = VK_NULL_HANDLE; }
     }
 
     auto VulkanRenderer::Impl::create_command_buffers() -> bool
@@ -887,6 +977,15 @@ namespace Donut
         write.dstSet = geo_set; write.dstBinding = 4; write.descriptorCount = 1;
         write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &cube_info;
         vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+
+        // The scene sphere samples the same cube (binding 1) — repoint it too.
+        if (sphere_set)
+        {
+            VkWriteDescriptorSet sw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            sw.dstSet = sphere_set; sw.dstBinding = 1; sw.descriptorCount = 1;
+            sw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sw.pImageInfo = &cube_info;
+            vkUpdateDescriptorSets(device, 1, &sw, 0, nullptr);
+        }
     }
 
     auto VulkanRenderer::Impl::create_present_resources() -> bool
@@ -1013,6 +1112,8 @@ namespace Donut
         VkPipelineDynamicStateCreateInfo dsci{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; dsci.dynamicStateCount = 2; dsci.pDynamicStates = dyn;
         VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO }; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
         VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineDepthStencilStateCreateInfo ds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        ds.depthTestEnable = VK_TRUE; ds.depthWriteEnable = VK_FALSE; ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL; // transparent lines: test but don't write
         VkPipelineColorBlendAttachmentState cba{};
         cba.blendEnable = VK_TRUE;
         cba.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA; cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA; cba.colorBlendOp = VK_BLEND_OP_ADD;
@@ -1023,12 +1124,98 @@ namespace Donut
         gpci.stageCount = 2; gpci.pStages = stages;
         gpci.pVertexInputState = &vin; gpci.pInputAssemblyState = &ia; gpci.pViewportState = &vps;
         gpci.pDynamicState = &dsci;
-        gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pColorBlendState = &cb;
-        gpci.layout = grid_pipeline_layout; gpci.renderPass = render_pass; gpci.subpass = 0;
+        gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pColorBlendState = &cb; gpci.pDepthStencilState = &ds;
+        gpci.layout = grid_pipeline_layout; gpci.renderPass = scene_render_pass; gpci.subpass = 0;
         VkResult pr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &grid_pipeline);
         vkDestroyShaderModule(device, vmod, nullptr); vkDestroyShaderModule(device, fmod, nullptr);
         if (pr != VK_SUCCESS) { DONUT_ERROR("Vulkan: grid pipeline creation failed ({})", (int)pr); return false; }
-        DONUT_INFO("Vulkan: scene resources ready ({} grid verts)", grid_vertex_count);
+
+        // Lit sphere: unit UV-sphere mesh (pos+normal, stride 24), placed/scaled by
+        // u_Transform; samples the geodesic HDRI cubemap for ambient (binding 1).
+        {
+            std::vector<float> sv; std::vector<uint32_t> si;
+            const int RINGS = 24, SECTORS = 48;
+            for (int r = 0; r <= RINGS; ++r)
+            {
+                float phi = (float)std::numbers::pi * r / RINGS;
+                for (int s = 0; s <= SECTORS; ++s)
+                {
+                    float theta = 2.0f * (float)std::numbers::pi * s / SECTORS;
+                    float x = sinf(phi) * cosf(theta), y = cosf(phi), z = sinf(phi) * sinf(theta);
+                    sv.push_back(x); sv.push_back(y); sv.push_back(z);   // position (unit)
+                    sv.push_back(x); sv.push_back(y); sv.push_back(z);   // normal == position
+                }
+            }
+            for (int r = 0; r < RINGS; ++r)
+                for (int s = 0; s < SECTORS; ++s)
+                {
+                    uint32_t a = r * (SECTORS + 1) + s, b = a + SECTORS + 1;
+                    si.push_back(a); si.push_back(b); si.push_back(a + 1);
+                    si.push_back(b); si.push_back(b + 1); si.push_back(a + 1);
+                }
+            sphere_index_count = (uint32_t)si.size();
+            VkDeviceSize svsz = sv.size() * sizeof(float), sisz = si.size() * sizeof(uint32_t);
+            if (!create_buffer(svsz, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, host_vis, sphere_vb, sphere_vb_mem)) return false;
+            if (!create_buffer(sisz, VK_BUFFER_USAGE_INDEX_BUFFER_BIT,  host_vis, sphere_ib, sphere_ib_mem)) return false;
+            void* sp = nullptr;
+            vkMapMemory(device, sphere_vb_mem, 0, svsz, 0, &sp); memcpy(sp, sv.data(), svsz); vkUnmapMemory(device, sphere_vb_mem);
+            vkMapMemory(device, sphere_ib_mem, 0, sisz, 0, &sp); memcpy(sp, si.data(), sisz); vkUnmapMemory(device, sphere_ib_mem);
+
+            if (!create_buffer(208, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, sphere_ubo, sphere_ubo_mem)) return false;
+            vkMapMemory(device, sphere_ubo_mem, 0, 208, 0, &sphere_ubo_mapped);
+
+            VkDescriptorSetLayoutBinding sb[2]{};
+            sb[0].binding = 0; sb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sb[0].descriptorCount = 1; sb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            sb[1].binding = 1; sb[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sb[1].descriptorCount = 1; sb[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkDescriptorSetLayoutCreateInfo sdslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO }; sdslci.bindingCount = 2; sdslci.pBindings = sb;
+            VK_CHECK(vkCreateDescriptorSetLayout(device, &sdslci, nullptr, &sphere_set_layout));
+            VkDescriptorPoolSize sps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
+            VkDescriptorPoolCreateInfo sdpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO }; sdpci.maxSets = 1; sdpci.poolSizeCount = 2; sdpci.pPoolSizes = sps;
+            VK_CHECK(vkCreateDescriptorPool(device, &sdpci, nullptr, &sphere_pool));
+            VkDescriptorSetAllocateInfo sdsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO }; sdsai.descriptorPool = sphere_pool; sdsai.descriptorSetCount = 1; sdsai.pSetLayouts = &sphere_set_layout;
+            VK_CHECK(vkAllocateDescriptorSets(device, &sdsai, &sphere_set));
+            VkDescriptorBufferInfo sbi{ sphere_ubo, 0, VK_WHOLE_SIZE };
+            VkDescriptorImageInfo sii{ cube_sampler, cube_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet sw[2]{};
+            sw[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; sw[0].dstSet = sphere_set; sw[0].dstBinding = 0; sw[0].descriptorCount = 1; sw[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sw[0].pBufferInfo = &sbi;
+            sw[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; sw[1].dstSet = sphere_set; sw[1].dstBinding = 1; sw[1].descriptorCount = 1; sw[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sw[1].pImageInfo = &sii;
+            vkUpdateDescriptorSets(device, 2, sw, 0, nullptr);
+
+            VkShaderModule svmod, sfmod;
+            if (!create_shader_module("assets/shaders/generated/Sphere.vertexMain.spv", svmod)) return false;
+            if (!create_shader_module("assets/shaders/generated/Sphere.fragmentMain.spv", sfmod)) return false;
+            VkPipelineLayoutCreateInfo splci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO }; splci.setLayoutCount = 1; splci.pSetLayouts = &sphere_set_layout;
+            VK_CHECK(vkCreatePipelineLayout(device, &splci, nullptr, &sphere_pipeline_layout));
+            VkPipelineShaderStageCreateInfo sstages[2]{};
+            sstages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; sstages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   sstages[0].module = svmod; sstages[0].pName = "main";
+            sstages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; sstages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; sstages[1].module = sfmod; sstages[1].pName = "main";
+            VkVertexInputBindingDescription svib{ 0, 6 * (uint32_t)sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+            VkVertexInputAttributeDescription svia[2] = { { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 }, { 1, 0, VK_FORMAT_R32G32B32_SFLOAT, 3 * (uint32_t)sizeof(float) } };
+            VkPipelineVertexInputStateCreateInfo svin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            svin.vertexBindingDescriptionCount = 1; svin.pVertexBindingDescriptions = &svib;
+            svin.vertexAttributeDescriptionCount = 2; svin.pVertexAttributeDescriptions = svia;
+            VkPipelineInputAssemblyStateCreateInfo sia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO }; sia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo svps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO }; svps.viewportCount = 1; svps.scissorCount = 1;
+            VkDynamicState sdyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo sdsci{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; sdsci.dynamicStateCount = 2; sdsci.pDynamicStates = sdyn;
+            VkPipelineRasterizationStateCreateInfo srs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO }; srs.polygonMode = VK_POLYGON_MODE_FILL; srs.cullMode = VK_CULL_MODE_NONE; srs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; srs.lineWidth = 1.0f;
+            VkPipelineMultisampleStateCreateInfo sms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; sms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineDepthStencilStateCreateInfo sds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            sds.depthTestEnable = VK_TRUE; sds.depthWriteEnable = VK_TRUE; sds.depthCompareOp = VK_COMPARE_OP_LESS;
+            VkPipelineColorBlendAttachmentState scba{}; scba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo scb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO }; scb.attachmentCount = 1; scb.pAttachments = &scba;
+            VkGraphicsPipelineCreateInfo sgpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            sgpci.stageCount = 2; sgpci.pStages = sstages;
+            sgpci.pVertexInputState = &svin; sgpci.pInputAssemblyState = &sia; sgpci.pViewportState = &svps;
+            sgpci.pDynamicState = &sdsci;
+            sgpci.pRasterizationState = &srs; sgpci.pMultisampleState = &sms; sgpci.pColorBlendState = &scb; sgpci.pDepthStencilState = &sds;
+            sgpci.layout = sphere_pipeline_layout; sgpci.renderPass = scene_render_pass; sgpci.subpass = 0;
+            VkResult spr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &sgpci, nullptr, &sphere_pipeline);
+            vkDestroyShaderModule(device, svmod, nullptr); vkDestroyShaderModule(device, sfmod, nullptr);
+            if (spr != VK_SUCCESS) { DONUT_ERROR("Vulkan: sphere pipeline creation failed ({})", (int)spr); return false; }
+        }
+
+        DONUT_INFO("Vulkan: scene resources ready ({} grid verts, {} sphere indices)", grid_vertex_count, sphere_index_count);
         return true;
     }
 
@@ -1059,6 +1246,28 @@ namespace Donut
         g.grid_alpha      = 0.75f;
         g.camera_pos      = scene_camera.get_orbital_position();
         if (grid_ubo_mapped) memcpy(grid_ubo_mapped, &g, sizeof(g));
+
+        struct SphereUBO {
+            glm::mat4 view_projection;                    // 0
+            glm::mat4 transform;                          // 64
+            glm::vec3 color; float specular;              // 128, 140
+            float emission; float p0[3];                  // 144
+            glm::vec3 light_pos; float p1;                // 160, 172
+            glm::vec3 camera_pos; int is_selected;        // 176, 188
+            glm::vec3 outline_color; float outline_width; // 192, 204
+        } s{};
+        static_assert(sizeof(SphereUBO) == 208, "SphereUBO std140 layout mismatch");
+        s.view_projection = vp;  // same no-transpose rule as the grid
+        s.transform       = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(2.0f));
+        s.color           = glm::vec3(0.85f, 0.35f, 0.2f);
+        s.specular        = 0.6f;
+        s.emission        = 0.0f;
+        s.light_pos       = glm::vec3(10.0f, 20.0f, 10.0f);
+        s.camera_pos      = scene_camera.get_orbital_position();
+        s.is_selected     = 0;
+        s.outline_color   = glm::vec3(1.0f, 1.0f, 0.0f);
+        s.outline_width   = 0.1f;
+        if (sphere_ubo_mapped) memcpy(sphere_ubo_mapped, &s, sizeof(s));
     }
 
     auto VulkanRenderer::Impl::update_geodesic_uniforms() -> void
@@ -1169,6 +1378,18 @@ namespace Donut
         if (grid_vb) vkDestroyBuffer(device, grid_vb, nullptr);
         if (grid_vb_mem) vkFreeMemory(device, grid_vb_mem, nullptr);
 
+        if (sphere_pipeline) vkDestroyPipeline(device, sphere_pipeline, nullptr);
+        if (sphere_pipeline_layout) vkDestroyPipelineLayout(device, sphere_pipeline_layout, nullptr);
+        if (sphere_pool) vkDestroyDescriptorPool(device, sphere_pool, nullptr);
+        if (sphere_set_layout) vkDestroyDescriptorSetLayout(device, sphere_set_layout, nullptr);
+        if (sphere_ubo_mapped) { vkUnmapMemory(device, sphere_ubo_mem); sphere_ubo_mapped = nullptr; }
+        if (sphere_ubo) vkDestroyBuffer(device, sphere_ubo, nullptr);
+        if (sphere_ubo_mem) vkFreeMemory(device, sphere_ubo_mem, nullptr);
+        if (sphere_ib) vkDestroyBuffer(device, sphere_ib, nullptr);
+        if (sphere_ib_mem) vkFreeMemory(device, sphere_ib_mem, nullptr);
+        if (sphere_vb) vkDestroyBuffer(device, sphere_vb, nullptr);
+        if (sphere_vb_mem) vkFreeMemory(device, sphere_vb_mem, nullptr);
+
         if (present_pipeline) vkDestroyPipeline(device, present_pipeline, nullptr);
         if (present_pipeline_layout) vkDestroyPipelineLayout(device, present_pipeline_layout, nullptr);
         if (present_pool) vkDestroyDescriptorPool(device, present_pool, nullptr);
@@ -1204,22 +1425,34 @@ namespace Donut
 
         if (scene_mode)
         {
-            // Scene view: grid lines drawn straight into the swapchain, then ImGui.
-            VkClearValue cv{}; cv.color = { { clear.r, clear.g, clear.b, clear.a } };
+            // Scene view: opaque sphere (writes depth) then the transparent grid on
+            // top, into a color+depth swapchain pass, then ImGui.
+            VkClearValue cvs[2]{};
+            cvs[0].color = { { clear.r, clear.g, clear.b, clear.a } };
+            cvs[1].depthStencil = { 1.0f, 0 };
             VkRenderPassBeginInfo rpbi{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-            rpbi.renderPass = render_pass; rpbi.framebuffer = framebuffers[image_index];
+            rpbi.renderPass = scene_render_pass; rpbi.framebuffer = scene_framebuffers[image_index];
             rpbi.renderArea = { { 0, 0 }, swapchain_extent };
-            rpbi.clearValueCount = 1; rpbi.pClearValues = &cv;
+            rpbi.clearValueCount = 2; rpbi.pClearValues = cvs;
             vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
+
             // Negative-height viewport flips Y so the scene reads like the GL path.
             VkViewport gvp{ 0, (float)swapchain_extent.height, (float)swapchain_extent.width, -(float)swapchain_extent.height, 0, 1 };
             VkRect2D gsc{ { 0, 0 }, swapchain_extent };
             vkCmdSetViewport(cmd, 0, 1, &gvp);
             vkCmdSetScissor(cmd, 0, 1, &gsc);
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline_layout, 0, 1, &sphere_set, 0, nullptr);
+            VkDeviceSize soff = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &sphere_vb, &soff);
+            vkCmdBindIndexBuffer(cmd, sphere_ib, 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, sphere_index_count, 1, 0, 0, 0);
+
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline_layout, 0, 1, &grid_set, 0, nullptr);
             VkDeviceSize goff = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &grid_vb, &goff);
             vkCmdDraw(cmd, grid_vertex_count, 1, 0, 0);
+
             if (draw_data)
                 ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
             vkCmdEndRenderPass(cmd);
@@ -1269,6 +1502,7 @@ namespace Donut
 
     auto VulkanRenderer::Impl::cleanup_swapchain() -> void
     {
+        destroy_scene_targets();
         for (auto fb : framebuffers) vkDestroyFramebuffer(device, fb, nullptr);
         framebuffers.clear();
         for (auto iv : image_views) vkDestroyImageView(device, iv, nullptr);
@@ -1296,6 +1530,7 @@ namespace Donut
         if (!create_image_views())  return false;
         if (!create_render_pass())  return false;
         if (!create_framebuffers())return false;
+        if (!create_scene_targets())return false;
         images_in_flight.assign(images.size(), VK_NULL_HANDLE);
         return true;
     }
@@ -1315,6 +1550,7 @@ namespace Donut
         if (!v.create_image_views())      return false;
         if (!v.create_render_pass())      return false;
         if (!v.create_framebuffers())    return false;
+        if (!v.create_scene_targets())    return false;
         if (!v.create_command_buffers())  return false;
         if (!v.create_sync_objects())     return false;
         if (!v.create_geodesic_resources()) return false;

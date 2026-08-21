@@ -97,8 +97,8 @@ namespace Donut
 
             if (scene)
             {
-                ImGui::TextDisabled("World-builder scene (grid). Drag to orbit, scroll to zoom.");
-                ImGui::TextDisabled("Lit sphere + skybox coming next.");
+                ImGui::TextDisabled("Lit sphere on the reference grid. Drag to orbit, scroll to zoom.");
+                ImGui::TextDisabled("Skybox coming next.");
             }
             else
             {
