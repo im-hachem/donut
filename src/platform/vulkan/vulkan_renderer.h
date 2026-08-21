@@ -3,6 +3,7 @@
 #include <glm/glm.hpp>
 #include <functional>
 #include <string>
+#include <vector>
 
 // Live-window Vulkan backend: owns the instance, surface, device, swapchain,
 // render pass, framebuffers and per-frame synchronization, and drives the
@@ -14,6 +15,14 @@ namespace Donut
     // GLFW at the loader the app links against (GLFW's own dlopen fails on
     // macOS/Homebrew) and configures the MoltenVK ICD / layer paths.
     auto vulkan_prepare_glfw() -> void;
+
+    // A placeable/editable sphere in the world-builder scene view.
+    struct SceneObject
+    {
+        glm::vec3 position = { 0.0f, 2.0f, 0.0f };
+        float     radius   = 2.0f;
+        glm::vec3 color    = { 0.85f, 0.35f, 0.2f };
+    };
 
     class VulkanRenderer
     {
@@ -51,6 +60,11 @@ namespace Donut
         // view (grid/sphere/skybox drawn with real Vulkan geometry pipelines).
         auto set_scene_mode(bool enabled) -> void;
         auto is_scene_mode() const -> bool;
+
+        // Runtime scene objects (spheres) drawn in scene view; the UI mutates this
+        // list directly. set_selected_object marks one for a rim highlight (-1 = none).
+        auto scene_objects() -> std::vector<SceneObject>&;
+        auto set_selected_object(int index) -> void;
 
     private:
         struct Impl;

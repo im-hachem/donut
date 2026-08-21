@@ -147,6 +147,10 @@ namespace Donut
         VkBuffer sphere_vb = VK_NULL_HANDLE; VkDeviceMemory sphere_vb_mem = VK_NULL_HANDLE;
         VkBuffer sphere_ib = VK_NULL_HANDLE; VkDeviceMemory sphere_ib_mem = VK_NULL_HANDLE;
         uint32_t sphere_index_count = 0;
+        static constexpr uint32_t MAX_SCENE_OBJECTS = 64;
+        std::vector<SceneObject> scene_objects{ SceneObject{} };  // one default sphere
+        int selected_object = 0;
+        VkDeviceSize sphere_ubo_stride = 0;  // aligned per-object UBO slot (dynamic offset)
         VkBuffer sphere_ubo = VK_NULL_HANDLE; VkDeviceMemory sphere_ubo_mem = VK_NULL_HANDLE;
         void* sphere_ubo_mapped = nullptr;
         VkDescriptorSetLayout sphere_set_layout = VK_NULL_HANDLE;
@@ -1179,23 +1183,27 @@ namespace Donut
             vkMapMemory(device, sphere_vb_mem, 0, svsz, 0, &sp); memcpy(sp, sv.data(), svsz); vkUnmapMemory(device, sphere_vb_mem);
             vkMapMemory(device, sphere_ib_mem, 0, sisz, 0, &sp); memcpy(sp, si.data(), sisz); vkUnmapMemory(device, sphere_ib_mem);
 
-            if (!create_buffer(208, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, sphere_ubo, sphere_ubo_mem)) return false;
-            vkMapMemory(device, sphere_ubo_mem, 0, 208, 0, &sphere_ubo_mapped);
+            VkPhysicalDeviceProperties pdp{}; vkGetPhysicalDeviceProperties(physical, &pdp);
+            VkDeviceSize min_align = pdp.limits.minUniformBufferOffsetAlignment;
+            sphere_ubo_stride = ((208 + min_align - 1) / min_align) * min_align;  // per-object slot
+            VkDeviceSize sphere_ubo_size = sphere_ubo_stride * MAX_SCENE_OBJECTS;
+            if (!create_buffer(sphere_ubo_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, sphere_ubo, sphere_ubo_mem)) return false;
+            vkMapMemory(device, sphere_ubo_mem, 0, sphere_ubo_size, 0, &sphere_ubo_mapped);
 
             VkDescriptorSetLayoutBinding sb[2]{};
-            sb[0].binding = 0; sb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sb[0].descriptorCount = 1; sb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            sb[0].binding = 0; sb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; sb[0].descriptorCount = 1; sb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
             sb[1].binding = 1; sb[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sb[1].descriptorCount = 1; sb[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
             VkDescriptorSetLayoutCreateInfo sdslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO }; sdslci.bindingCount = 2; sdslci.pBindings = sb;
             VK_CHECK(vkCreateDescriptorSetLayout(device, &sdslci, nullptr, &sphere_set_layout));
-            VkDescriptorPoolSize sps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
+            VkDescriptorPoolSize sps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
             VkDescriptorPoolCreateInfo sdpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO }; sdpci.maxSets = 1; sdpci.poolSizeCount = 2; sdpci.pPoolSizes = sps;
             VK_CHECK(vkCreateDescriptorPool(device, &sdpci, nullptr, &sphere_pool));
             VkDescriptorSetAllocateInfo sdsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO }; sdsai.descriptorPool = sphere_pool; sdsai.descriptorSetCount = 1; sdsai.pSetLayouts = &sphere_set_layout;
             VK_CHECK(vkAllocateDescriptorSets(device, &sdsai, &sphere_set));
-            VkDescriptorBufferInfo sbi{ sphere_ubo, 0, VK_WHOLE_SIZE };
+            VkDescriptorBufferInfo sbi{ sphere_ubo, 0, 208 };  // per-draw size; the dynamic offset selects the object slot
             VkDescriptorImageInfo sii{ cube_sampler, cube_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
             VkWriteDescriptorSet sw[2]{};
-            sw[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; sw[0].dstSet = sphere_set; sw[0].dstBinding = 0; sw[0].descriptorCount = 1; sw[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; sw[0].pBufferInfo = &sbi;
+            sw[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; sw[0].dstSet = sphere_set; sw[0].dstBinding = 0; sw[0].descriptorCount = 1; sw[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; sw[0].pBufferInfo = &sbi;
             sw[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; sw[1].dstSet = sphere_set; sw[1].dstBinding = 1; sw[1].descriptorCount = 1; sw[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sw[1].pImageInfo = &sii;
             vkUpdateDescriptorSets(device, 2, sw, 0, nullptr);
 
@@ -1342,19 +1350,26 @@ namespace Donut
             glm::vec3 light_pos; float p1;                // 160, 172
             glm::vec3 camera_pos; int is_selected;        // 176, 188
             glm::vec3 outline_color; float outline_width; // 192, 204
-        } s{};
+        };
         static_assert(sizeof(SphereUBO) == 208, "SphereUBO std140 layout mismatch");
-        s.view_projection = vp;  // same no-transpose rule as the grid
-        s.transform       = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, 2.0f, 0.0f)) * glm::scale(glm::mat4(1.0f), glm::vec3(2.0f));
-        s.color           = glm::vec3(0.85f, 0.35f, 0.2f);
-        s.specular        = 0.6f;
-        s.emission        = 0.0f;
-        s.light_pos       = glm::vec3(10.0f, 20.0f, 10.0f);
-        s.camera_pos      = scene_camera.get_orbital_position();
-        s.is_selected     = 0;
-        s.outline_color   = glm::vec3(1.0f, 1.0f, 0.0f);
-        s.outline_width   = 0.1f;
-        if (sphere_ubo_mapped) memcpy(sphere_ubo_mapped, &s, sizeof(s));
+        glm::vec3 cam_pos = scene_camera.get_orbital_position();
+        uint32_t obj_count = (uint32_t)std::min(scene_objects.size(), (size_t)MAX_SCENE_OBJECTS);
+        for (uint32_t i = 0; i < obj_count; ++i)
+        {
+            const SceneObject& o = scene_objects[i];
+            SphereUBO s{};
+            s.view_projection = vp;  // same no-transpose rule as the grid
+            s.transform       = glm::translate(glm::mat4(1.0f), o.position) * glm::scale(glm::mat4(1.0f), glm::vec3(o.radius));
+            s.color           = o.color;
+            s.specular        = 0.6f;
+            s.emission        = 0.0f;
+            s.light_pos       = glm::vec3(10.0f, 20.0f, 10.0f);
+            s.camera_pos      = cam_pos;
+            s.is_selected     = ((int)i == selected_object) ? 1 : 0;
+            s.outline_color   = glm::vec3(1.0f, 1.0f, 0.0f);
+            s.outline_width   = 0.15f;
+            if (sphere_ubo_mapped) memcpy((char*)sphere_ubo_mapped + (VkDeviceSize)i * sphere_ubo_stride, &s, sizeof(s));
+        }
 
         struct SkyboxUBO { glm::mat4 projection; glm::mat4 view; } sky{};
         static_assert(sizeof(SkyboxUBO) == 128, "SkyboxUBO std140 layout mismatch");
@@ -1552,10 +1567,15 @@ namespace Donut
             vkCmdDraw(cmd, 36, 1, 0, 0);
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline_layout, 0, 1, &sphere_set, 0, nullptr);
             VkDeviceSize soff = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &sphere_vb, &soff);
             vkCmdBindIndexBuffer(cmd, sphere_ib, 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, sphere_index_count, 1, 0, 0, 0);
+            uint32_t obj_count = (uint32_t)std::min(scene_objects.size(), (size_t)MAX_SCENE_OBJECTS);
+            for (uint32_t i = 0; i < obj_count; ++i)
+            {
+                uint32_t dyn = (uint32_t)((VkDeviceSize)i * sphere_ubo_stride);  // select this object's UBO slot
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline_layout, 0, 1, &sphere_set, 1, &dyn);
+                vkCmdDrawIndexed(cmd, sphere_index_count, 1, 0, 0, 0);
+            }
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, grid_pipeline_layout, 0, 1, &grid_set, 0, nullptr);
@@ -1773,6 +1793,16 @@ namespace Donut
     auto VulkanRenderer::is_scene_mode() const -> bool
     {
         return m_impl && m_impl->scene_mode;
+    }
+
+    auto VulkanRenderer::scene_objects() -> std::vector<SceneObject>&
+    {
+        return m_impl->scene_objects;
+    }
+
+    auto VulkanRenderer::set_selected_object(int index) -> void
+    {
+        if (m_impl) m_impl->selected_object = index;
     }
 
     auto VulkanRenderer::draw_frame(const glm::vec4& clear_color, const std::function<void()>& build_ui) -> void

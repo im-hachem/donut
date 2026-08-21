@@ -97,8 +97,46 @@ namespace Donut
 
             if (scene)
             {
-                ImGui::TextDisabled("Lit sphere + HDRI skybox on the reference grid.");
-                ImGui::TextDisabled("Drag to orbit, scroll to zoom.");
+                ImGui::TextDisabled("Drag to orbit, scroll to zoom. HDRI skybox behind.");
+                ImGui::Separator();
+
+                auto& objs = m_vulkan_renderer->scene_objects();
+                static int sel = 0;
+                if (sel >= (int)objs.size()) sel = (int)objs.size() - 1;
+
+                ImGui::Text("Spheres (%d)", (int)objs.size());
+                if (ImGui::Button("Add") && objs.size() < 64)
+                {
+                    SceneObject o;
+                    o.position = glm::vec3(((int)objs.size() % 5) * 5.0f - 10.0f, 2.0f, ((int)objs.size() / 5) * 5.0f);
+                    o.radius   = 1.5f;
+                    o.color    = glm::vec3(0.35f + 0.12f * (objs.size() % 5), 0.55f, 0.9f - 0.12f * (objs.size() % 4));
+                    objs.push_back(o);
+                    sel = (int)objs.size() - 1;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Delete") && !objs.empty())
+                {
+                    objs.erase(objs.begin() + sel);
+                    if (sel >= (int)objs.size()) sel = (int)objs.size() - 1;
+                }
+
+                ImGui::BeginChild("obj_list", ImVec2(0, 90), true);
+                for (int i = 0; i < (int)objs.size(); ++i)
+                {
+                    std::string label = "Sphere " + std::to_string(i);
+                    if (ImGui::Selectable(label.c_str(), sel == i)) sel = i;
+                }
+                ImGui::EndChild();
+
+                m_vulkan_renderer->set_selected_object(sel);
+                if (sel >= 0 && sel < (int)objs.size())
+                {
+                    SceneObject& o = objs[sel];
+                    ImGui::DragFloat3("Position", &o.position.x, 0.1f);
+                    ImGui::DragFloat("Radius", &o.radius, 0.05f, 0.1f, 20.0f);
+                    ImGui::ColorEdit3("Color", &o.color.x);
+                }
             }
             else
             {
