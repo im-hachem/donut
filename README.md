@@ -34,3 +34,8 @@ y_n+
 $$
 
 RK4 has a local truncation error of $O(h^5)$ and a global error of $O(h^4)$, making it suitable for maintaining accurate trajectories without requiring extremely small steps everywhere. Adaptive stepping and early termination are used alongside RK4 to keep the cost of tracing rays manageable. Rays near the black hole receive more computation than rays that are already far from the gravitational field.
+\
+
+## License
+Donut is released under the MIT License.
+The source code may be used, modified, and redistributed freely, including in commercial projects, provided that the original copyright notice and license are retained.
