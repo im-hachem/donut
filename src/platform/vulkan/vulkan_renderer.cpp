@@ -155,6 +155,17 @@ namespace Donut
         VkPipelineLayout sphere_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline sphere_pipeline = VK_NULL_HANDLE;
 
+        // Skybox (Skybox.slang): a cube sampling the HDRI cubemap at the far plane
+        // (pos.xyww -> depth 1), drawn first as the scene background.
+        VkBuffer skybox_vb = VK_NULL_HANDLE; VkDeviceMemory skybox_vb_mem = VK_NULL_HANDLE;
+        VkBuffer skybox_ubo = VK_NULL_HANDLE; VkDeviceMemory skybox_ubo_mem = VK_NULL_HANDLE;
+        void* skybox_ubo_mapped = nullptr;
+        VkDescriptorSetLayout skybox_set_layout = VK_NULL_HANDLE;
+        VkDescriptorPool skybox_pool = VK_NULL_HANDLE;
+        VkDescriptorSet skybox_set = VK_NULL_HANDLE;
+        VkPipelineLayout skybox_pipeline_layout = VK_NULL_HANDLE;
+        VkPipeline skybox_pipeline = VK_NULL_HANDLE;
+
         auto find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags flags) const -> uint32_t;
         auto create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags props, VkBuffer& buf, VkDeviceMemory& mem) const -> bool;
         static auto load_spirv(const std::string& path) -> std::vector<uint32_t>;
@@ -986,6 +997,13 @@ namespace Donut
             sw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; sw.pImageInfo = &cube_info;
             vkUpdateDescriptorSets(device, 1, &sw, 0, nullptr);
         }
+        if (skybox_set)
+        {
+            VkWriteDescriptorSet kw{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            kw.dstSet = skybox_set; kw.dstBinding = 1; kw.descriptorCount = 1;
+            kw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; kw.pImageInfo = &cube_info;
+            vkUpdateDescriptorSets(device, 1, &kw, 0, nullptr);
+        }
     }
 
     auto VulkanRenderer::Impl::create_present_resources() -> bool
@@ -1215,7 +1233,76 @@ namespace Donut
             if (spr != VK_SUCCESS) { DONUT_ERROR("Vulkan: sphere pipeline creation failed ({})", (int)spr); return false; }
         }
 
-        DONUT_INFO("Vulkan: scene resources ready ({} grid verts, {} sphere indices)", grid_vertex_count, sphere_index_count);
+        // Skybox: a unit cube (36 verts) sampling the HDRI cubemap; the vertex
+        // shader forces depth 1 (pos.xyww) so it sits behind all scene geometry.
+        {
+            const float cube[] = {
+                -1,-1,-1,  1,-1,-1,  1, 1,-1,  1, 1,-1, -1, 1,-1, -1,-1,-1,
+                -1,-1, 1,  1,-1, 1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1,-1, 1,
+                -1, 1, 1, -1, 1,-1, -1,-1,-1, -1,-1,-1, -1,-1, 1, -1, 1, 1,
+                 1, 1, 1,  1, 1,-1,  1,-1,-1,  1,-1,-1,  1,-1, 1,  1, 1, 1,
+                -1,-1,-1,  1,-1,-1,  1,-1, 1,  1,-1, 1, -1,-1, 1, -1,-1,-1,
+                -1, 1,-1,  1, 1,-1,  1, 1, 1,  1, 1, 1, -1, 1, 1, -1, 1,-1
+            };
+            if (!create_buffer(sizeof(cube), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, host_vis, skybox_vb, skybox_vb_mem)) return false;
+            void* kp = nullptr; vkMapMemory(device, skybox_vb_mem, 0, sizeof(cube), 0, &kp); memcpy(kp, cube, sizeof(cube)); vkUnmapMemory(device, skybox_vb_mem);
+
+            // $Globals UBO (128 B: u_Projection@0, u_View@64); u_Skybox at binding 1.
+            if (!create_buffer(128, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, skybox_ubo, skybox_ubo_mem)) return false;
+            vkMapMemory(device, skybox_ubo_mem, 0, 128, 0, &skybox_ubo_mapped);
+
+            VkDescriptorSetLayoutBinding kb[2]{};
+            kb[0].binding = 0; kb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; kb[0].descriptorCount = 1; kb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            kb[1].binding = 1; kb[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; kb[1].descriptorCount = 1; kb[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+            VkDescriptorSetLayoutCreateInfo kdslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO }; kdslci.bindingCount = 2; kdslci.pBindings = kb;
+            VK_CHECK(vkCreateDescriptorSetLayout(device, &kdslci, nullptr, &skybox_set_layout));
+            VkDescriptorPoolSize kps[2] = { { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }, { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 } };
+            VkDescriptorPoolCreateInfo kdpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO }; kdpci.maxSets = 1; kdpci.poolSizeCount = 2; kdpci.pPoolSizes = kps;
+            VK_CHECK(vkCreateDescriptorPool(device, &kdpci, nullptr, &skybox_pool));
+            VkDescriptorSetAllocateInfo kdsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO }; kdsai.descriptorPool = skybox_pool; kdsai.descriptorSetCount = 1; kdsai.pSetLayouts = &skybox_set_layout;
+            VK_CHECK(vkAllocateDescriptorSets(device, &kdsai, &skybox_set));
+            VkDescriptorBufferInfo kbi{ skybox_ubo, 0, VK_WHOLE_SIZE };
+            VkDescriptorImageInfo kii{ cube_sampler, cube_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet kw[2]{};
+            kw[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; kw[0].dstSet = skybox_set; kw[0].dstBinding = 0; kw[0].descriptorCount = 1; kw[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; kw[0].pBufferInfo = &kbi;
+            kw[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; kw[1].dstSet = skybox_set; kw[1].dstBinding = 1; kw[1].descriptorCount = 1; kw[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; kw[1].pImageInfo = &kii;
+            vkUpdateDescriptorSets(device, 2, kw, 0, nullptr);
+
+            VkShaderModule kvmod, kfmod;
+            if (!create_shader_module("assets/shaders/generated/Skybox.vertexMain.spv", kvmod)) return false;
+            if (!create_shader_module("assets/shaders/generated/Skybox.fragmentMain.spv", kfmod)) return false;
+            VkPipelineLayoutCreateInfo kplci{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO }; kplci.setLayoutCount = 1; kplci.pSetLayouts = &skybox_set_layout;
+            VK_CHECK(vkCreatePipelineLayout(device, &kplci, nullptr, &skybox_pipeline_layout));
+            VkPipelineShaderStageCreateInfo kstages[2]{};
+            kstages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; kstages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   kstages[0].module = kvmod; kstages[0].pName = "main";
+            kstages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO; kstages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; kstages[1].module = kfmod; kstages[1].pName = "main";
+            VkVertexInputBindingDescription kvib{ 0, 3 * (uint32_t)sizeof(float), VK_VERTEX_INPUT_RATE_VERTEX };
+            VkVertexInputAttributeDescription kvia{ 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+            VkPipelineVertexInputStateCreateInfo kvin{ VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            kvin.vertexBindingDescriptionCount = 1; kvin.pVertexBindingDescriptions = &kvib;
+            kvin.vertexAttributeDescriptionCount = 1; kvin.pVertexAttributeDescriptions = &kvia;
+            VkPipelineInputAssemblyStateCreateInfo kia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO }; kia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            VkPipelineViewportStateCreateInfo kvps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO }; kvps.viewportCount = 1; kvps.scissorCount = 1;
+            VkDynamicState kdyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo kdsci{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; kdsci.dynamicStateCount = 2; kdsci.pDynamicStates = kdyn;
+            VkPipelineRasterizationStateCreateInfo krs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO }; krs.polygonMode = VK_POLYGON_MODE_FILL; krs.cullMode = VK_CULL_MODE_NONE; krs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; krs.lineWidth = 1.0f;
+            VkPipelineMultisampleStateCreateInfo kms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; kms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+            VkPipelineDepthStencilStateCreateInfo kds{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+            kds.depthTestEnable = VK_FALSE; kds.depthWriteEnable = VK_FALSE; // background: neither tests nor writes depth
+            VkPipelineColorBlendAttachmentState kcba{}; kcba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+            VkPipelineColorBlendStateCreateInfo kcb{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO }; kcb.attachmentCount = 1; kcb.pAttachments = &kcba;
+            VkGraphicsPipelineCreateInfo kgpci{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+            kgpci.stageCount = 2; kgpci.pStages = kstages;
+            kgpci.pVertexInputState = &kvin; kgpci.pInputAssemblyState = &kia; kgpci.pViewportState = &kvps;
+            kgpci.pDynamicState = &kdsci;
+            kgpci.pRasterizationState = &krs; kgpci.pMultisampleState = &kms; kgpci.pColorBlendState = &kcb; kgpci.pDepthStencilState = &kds;
+            kgpci.layout = skybox_pipeline_layout; kgpci.renderPass = scene_render_pass; kgpci.subpass = 0;
+            VkResult kpr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &kgpci, nullptr, &skybox_pipeline);
+            vkDestroyShaderModule(device, kvmod, nullptr); vkDestroyShaderModule(device, kfmod, nullptr);
+            if (kpr != VK_SUCCESS) { DONUT_ERROR("Vulkan: skybox pipeline creation failed ({})", (int)kpr); return false; }
+        }
+
+        DONUT_INFO("Vulkan: scene resources ready ({} grid verts, {} sphere indices, skybox)", grid_vertex_count, sphere_index_count);
         return true;
     }
 
@@ -1268,6 +1355,12 @@ namespace Donut
         s.outline_color   = glm::vec3(1.0f, 1.0f, 0.0f);
         s.outline_width   = 0.1f;
         if (sphere_ubo_mapped) memcpy(sphere_ubo_mapped, &s, sizeof(s));
+
+        struct SkyboxUBO { glm::mat4 projection; glm::mat4 view; } sky{};
+        static_assert(sizeof(SkyboxUBO) == 128, "SkyboxUBO std140 layout mismatch");
+        sky.projection = scene_camera.get_projection_matrix();                 // no transpose (mul(M,v))
+        sky.view       = glm::mat4(glm::mat3(scene_camera.get_view_matrix())); // strip translation so the sky stays centered
+        if (skybox_ubo_mapped) memcpy(skybox_ubo_mapped, &sky, sizeof(sky));
     }
 
     auto VulkanRenderer::Impl::update_geodesic_uniforms() -> void
@@ -1390,6 +1483,16 @@ namespace Donut
         if (sphere_vb) vkDestroyBuffer(device, sphere_vb, nullptr);
         if (sphere_vb_mem) vkFreeMemory(device, sphere_vb_mem, nullptr);
 
+        if (skybox_pipeline) vkDestroyPipeline(device, skybox_pipeline, nullptr);
+        if (skybox_pipeline_layout) vkDestroyPipelineLayout(device, skybox_pipeline_layout, nullptr);
+        if (skybox_pool) vkDestroyDescriptorPool(device, skybox_pool, nullptr);
+        if (skybox_set_layout) vkDestroyDescriptorSetLayout(device, skybox_set_layout, nullptr);
+        if (skybox_ubo_mapped) { vkUnmapMemory(device, skybox_ubo_mem); skybox_ubo_mapped = nullptr; }
+        if (skybox_ubo) vkDestroyBuffer(device, skybox_ubo, nullptr);
+        if (skybox_ubo_mem) vkFreeMemory(device, skybox_ubo_mem, nullptr);
+        if (skybox_vb) vkDestroyBuffer(device, skybox_vb, nullptr);
+        if (skybox_vb_mem) vkFreeMemory(device, skybox_vb_mem, nullptr);
+
         if (present_pipeline) vkDestroyPipeline(device, present_pipeline, nullptr);
         if (present_pipeline_layout) vkDestroyPipelineLayout(device, present_pipeline_layout, nullptr);
         if (present_pool) vkDestroyDescriptorPool(device, present_pool, nullptr);
@@ -1441,6 +1544,12 @@ namespace Donut
             VkRect2D gsc{ { 0, 0 }, swapchain_extent };
             vkCmdSetViewport(cmd, 0, 1, &gvp);
             vkCmdSetScissor(cmd, 0, 1, &gsc);
+
+            // Skybox background first (forces depth 1; no depth test/write).
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, skybox_pipeline_layout, 0, 1, &skybox_set, 0, nullptr);
+            VkDeviceSize skoff = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &skybox_vb, &skoff);
+            vkCmdDraw(cmd, 36, 1, 0, 0);
 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline);
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, sphere_pipeline_layout, 0, 1, &sphere_set, 0, nullptr);
