@@ -1,6 +1,7 @@
 #include "vulkan_renderer.h"
 #include "core/log.h"
 #include "core/camera.h"
+#include "core/settings_manager.h"
 
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
@@ -82,20 +83,29 @@ namespace Donut
 
         VkPhysicalDeviceMemoryProperties mem_props{};
 
-        // Geodesic scene, rendered every frame into a fixed low-resolution
-        // offscreen image (keeps each draw well under the Metal GPU watchdog),
-        // then upscaled onto the swapchain by the present pass below.
-        static constexpr uint32_t GEO_W = 480, GEO_H = 270;
-        VkImage       geo_image     = VK_NULL_HANDLE;
-        VkDeviceMemory geo_image_mem = VK_NULL_HANDLE;
-        VkImageView   geo_image_view = VK_NULL_HANDLE;
-        VkRenderPass  geo_render_pass = VK_NULL_HANDLE;
-        VkFramebuffer geo_framebuffer = VK_NULL_HANDLE;
+        // The geodesic is rendered every frame into an offscreen image, then
+        // upscaled onto the swapchain by the present pass. Progressive resolution:
+        // low-res while the camera moves (keeps dragging responsive and each draw
+        // well under the Metal GPU watchdog) and high-res once it settles (resolves
+        // the photon ring cleanly). Both are 16:9 so the camera aspect is shared.
+        static constexpr uint32_t GEO_LO_W = 480, GEO_LO_H = 270;
+        static constexpr uint32_t GEO_HI_W = 960, GEO_HI_H = 540;
+        struct GeoTarget
+        {
+            uint32_t        w = 0, h = 0;
+            VkImage         image = VK_NULL_HANDLE;
+            VkDeviceMemory  mem   = VK_NULL_HANDLE;
+            VkImageView     view  = VK_NULL_HANDLE;
+            VkFramebuffer   fb    = VK_NULL_HANDLE;
+            VkDescriptorSet present_set = VK_NULL_HANDLE;  // present pass samples this target
+        };
+        GeoTarget     geo_lo, geo_hi;
+        VkRenderPass  geo_render_pass = VK_NULL_HANDLE;    // shared (resolution-independent)
         VkBuffer cam_buf = VK_NULL_HANDLE, disk_buf = VK_NULL_HANDLE, obj_buf = VK_NULL_HANDLE, sim_buf = VK_NULL_HANDLE;
         VkDeviceMemory cam_mem = VK_NULL_HANDLE, disk_mem = VK_NULL_HANDLE, obj_mem = VK_NULL_HANDLE, sim_mem = VK_NULL_HANDLE;
         void* cam_mapped = nullptr;
         void* sim_mapped = nullptr;
-        Camera camera{ 60.0f, (float)GEO_W / (float)GEO_H, 0.1f, 100.0f };
+        Camera camera{ 60.0f, (float)GEO_HI_W / (float)GEO_HI_H, 0.1f, 100.0f };
         bool left_was_down = false;
         double last_frame_time = 0.0;               // for free-fly dt
         double fps_last_x = 0.0, fps_last_y = 0.0;  // cursor tracking for free-fly look
@@ -117,14 +127,13 @@ namespace Donut
         VkSampler present_sampler = VK_NULL_HANDLE;
         VkDescriptorSetLayout present_set_layout = VK_NULL_HANDLE;
         VkDescriptorPool present_pool = VK_NULL_HANDLE;
-        VkDescriptorSet present_set = VK_NULL_HANDLE;
         VkPipelineLayout present_pipeline_layout = VK_NULL_HANDLE;
         VkPipeline present_pipeline = VK_NULL_HANDLE;
 
         // World-builder scene view (grid now; sphere/skybox next). Normal-scale
         // orbital camera; geometry drawn straight into the swapchain render pass.
         bool scene_mode = false;
-        Camera scene_camera{ 45.0f, (float)GEO_W / (float)GEO_H, 0.1f, 1000.0f };
+        Camera scene_camera{ 45.0f, (float)GEO_HI_W / (float)GEO_HI_H, 0.1f, 1000.0f };
         VkBuffer grid_vb = VK_NULL_HANDLE; VkDeviceMemory grid_vb_mem = VK_NULL_HANDLE;
         uint32_t grid_vertex_count = 0;
         VkBuffer grid_ubo = VK_NULL_HANDLE; VkDeviceMemory grid_ubo_mem = VK_NULL_HANDLE;
@@ -184,6 +193,7 @@ namespace Donut
         auto create_command_buffers() -> bool;
         auto create_sync_objects() -> bool;
         auto create_geodesic_resources() -> bool;
+        auto create_geo_target(GeoTarget& target, uint32_t w, uint32_t h) -> bool;
         auto create_hdri_cubemap(const char* path) -> bool;
         auto rebuild_hdri_cubemap(const char* path) -> void;
         auto create_present_resources() -> bool;
@@ -584,28 +594,42 @@ namespace Donut
         return vkCreateShaderModule(device, &ci, nullptr, &out) == VK_SUCCESS;
     }
 
+    // Creates one geodesic render target (image + memory + view + framebuffer)
+    // at w x h against the shared geo_render_pass. Used for the low- and high-res
+    // progressive targets.
+    auto VulkanRenderer::Impl::create_geo_target(GeoTarget& t, uint32_t w, uint32_t h) -> bool
+    {
+        const VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
+        t.w = w; t.h = h;
+
+        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = fmt; ici.extent = { w, h, 1 };
+        ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        VK_CHECK(vkCreateImage(device, &ici, nullptr, &t.image));
+        VkMemoryRequirements im_req{}; vkGetImageMemoryRequirements(device, t.image, &im_req);
+        VkMemoryAllocateInfo im_alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        im_alloc.allocationSize = im_req.size;
+        im_alloc.memoryTypeIndex = find_memory_type(im_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        VK_CHECK(vkAllocateMemory(device, &im_alloc, nullptr, &t.mem));
+        VK_CHECK(vkBindImageMemory(device, t.image, t.mem, 0));
+        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+        vci.image = t.image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
+        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+        VK_CHECK(vkCreateImageView(device, &vci, nullptr, &t.view));
+        VkFramebufferCreateInfo fbci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
+        fbci.renderPass = geo_render_pass; fbci.attachmentCount = 1; fbci.pAttachments = &t.view;
+        fbci.width = w; fbci.height = h; fbci.layers = 1;
+        VK_CHECK(vkCreateFramebuffer(device, &fbci, nullptr, &t.fb));
+        return true;
+    }
+
     auto VulkanRenderer::Impl::create_geodesic_resources() -> bool
     {
         const VkFormat fmt = VK_FORMAT_R8G8B8A8_UNORM;
         const VkMemoryPropertyFlags host_vis = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         const float SagA_rs = 1.269e10f;
-
-        VkImageCreateInfo ici{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
-        ici.imageType = VK_IMAGE_TYPE_2D; ici.format = fmt; ici.extent = { GEO_W, GEO_H, 1 };
-        ici.mipLevels = 1; ici.arrayLayers = 1; ici.samples = VK_SAMPLE_COUNT_1_BIT;
-        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-        VK_CHECK(vkCreateImage(device, &ici, nullptr, &geo_image));
-        VkMemoryRequirements im_req{}; vkGetImageMemoryRequirements(device, geo_image, &im_req);
-        VkMemoryAllocateInfo im_alloc{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
-        im_alloc.allocationSize = im_req.size;
-        im_alloc.memoryTypeIndex = find_memory_type(im_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        VK_CHECK(vkAllocateMemory(device, &im_alloc, nullptr, &geo_image_mem));
-        VK_CHECK(vkBindImageMemory(device, geo_image, geo_image_mem, 0));
-        VkImageViewCreateInfo vci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-        vci.image = geo_image; vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.format = fmt;
-        vci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
-        VK_CHECK(vkCreateImageView(device, &vci, nullptr, &geo_image_view));
 
         VkAttachmentDescription color{};
         color.format = fmt; color.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -627,10 +651,9 @@ namespace Donut
         rpci.subpassCount = 1; rpci.pSubpasses = &subpass;
         rpci.dependencyCount = 2; rpci.pDependencies = deps;
         VK_CHECK(vkCreateRenderPass(device, &rpci, nullptr, &geo_render_pass));
-        VkFramebufferCreateInfo fbci{ VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO };
-        fbci.renderPass = geo_render_pass; fbci.attachmentCount = 1; fbci.pAttachments = &geo_image_view;
-        fbci.width = GEO_W; fbci.height = GEO_H; fbci.layers = 1;
-        VK_CHECK(vkCreateFramebuffer(device, &fbci, nullptr, &geo_framebuffer));
+
+        if (!create_geo_target(geo_lo, GEO_LO_W, GEO_LO_H)) return false;
+        if (!create_geo_target(geo_hi, GEO_HI_W, GEO_HI_H)) return false;
 
         create_buffer(128, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, cam_buf, cam_mem);
         create_buffer(32,  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host_vis, disk_buf, disk_mem);
@@ -639,17 +662,19 @@ namespace Donut
 
         camera.set_camera_mode(CameraMode::Orbital);
         camera.set_orbital_target(glm::vec3(0.0f));
-        camera.set_orbital_radius(1e11);
-        camera.set_orbital_limits(4e10, 3e11);
+        camera.set_orbital_radius(4e11);          // ~31 r_s: outside the 12 r_s disk
+        camera.set_orbital_limits(2.2e11, 1.5e12);
         camera.set_orbital_speed(0.01f);
-        camera.set_zoom_speed(1e10);
+        camera.set_zoom_speed(3e10);
         camera.set_azimuth(0.0f);
         camera.set_elevation(1.25f);
 
         void* p = nullptr;
         vkMapMemory(device, cam_mem, 0, 128, 0, &cam_mapped);  // camera UBO is refilled every frame
 
-        float disk_data[8] = { SagA_rs * 2.2f, SagA_rs * 5.2f, 2.0f, SagA_rs * 0.1f, 0.1f, 0, 0, 0 };
+        // disk_r1=inner (ISCO 3 r_s), disk_r2=outer, disk_num=turbulence strength,
+        // thickness (unused by the thin-disk model), disk_density=exposure.
+        float disk_data[8] = { SagA_rs * 3.0f, SagA_rs * 12.0f, 0.4f, SagA_rs * 0.1f, 0.1f, 0, 0, 0 };
         vkMapMemory(device, disk_mem, 0, 32, 0, &p); memcpy(p, disk_data, sizeof(disk_data)); vkUnmapMemory(device, disk_mem);
 
         std::vector<uint8_t> obj_data(800, 0);
@@ -704,8 +729,11 @@ namespace Donut
         vin.vertexBindingDescriptionCount = 1; vin.pVertexBindingDescriptions = &vib;
         vin.vertexAttributeDescriptionCount = 2; vin.pVertexAttributeDescriptions = via;
         VkPipelineInputAssemblyStateCreateInfo ia{ VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO }; ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-        VkViewport vp{ 0, 0, (float)GEO_W, (float)GEO_H, 0, 1 }; VkRect2D sc{ { 0, 0 }, { GEO_W, GEO_H } };
-        VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO }; vps.viewportCount = 1; vps.pViewports = &vp; vps.scissorCount = 1; vps.pScissors = &sc;
+        // Dynamic viewport/scissor: the same pipeline renders into either the
+        // low- or high-res target, sized per frame in record_command_buffer.
+        VkPipelineViewportStateCreateInfo vps{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO }; vps.viewportCount = 1; vps.scissorCount = 1;
+        VkDynamicState dyn_states[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo dyn{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO }; dyn.dynamicStateCount = 2; dyn.pDynamicStates = dyn_states;
         VkPipelineRasterizationStateCreateInfo rs{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO }; rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE; rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
         VkPipelineMultisampleStateCreateInfo ms{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO }; ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineColorBlendAttachmentState cba{}; cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -714,6 +742,7 @@ namespace Donut
         gpci.stageCount = 2; gpci.pStages = stages;
         gpci.pVertexInputState = &vin; gpci.pInputAssemblyState = &ia; gpci.pViewportState = &vps;
         gpci.pRasterizationState = &rs; gpci.pMultisampleState = &ms; gpci.pColorBlendState = &cb;
+        gpci.pDynamicState = &dyn;
         gpci.layout = geo_pipeline_layout; gpci.renderPass = geo_render_pass; gpci.subpass = 0;
         VkResult pr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, nullptr, &geo_pipeline);
         vkDestroyShaderModule(device, vmod, nullptr); vkDestroyShaderModule(device, fmod, nullptr);
@@ -721,7 +750,8 @@ namespace Donut
 
         start_time = glfwGetTime();
         update_geodesic_uniforms();
-        DONUT_INFO("Vulkan: geodesic resources ready ({}x{} offscreen)", (int)GEO_W, (int)GEO_H);
+        DONUT_INFO("Vulkan: geodesic resources ready ({}x{} moving / {}x{} settled)",
+                   (int)GEO_LO_W, (int)GEO_LO_H, (int)GEO_HI_W, (int)GEO_HI_H);
         return true;
     }
 
@@ -1021,17 +1051,22 @@ namespace Donut
         VkDescriptorSetLayoutCreateInfo dslci{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
         dslci.bindingCount = 1; dslci.pBindings = &bind;
         VK_CHECK(vkCreateDescriptorSetLayout(device, &dslci, nullptr, &present_set_layout));
-        VkDescriptorPoolSize psize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1 };
+        // One present set per geodesic target (low-/high-res), each sampling its
+        // own image; record_command_buffer binds whichever was rendered this frame.
+        VkDescriptorPoolSize psize{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2 };
         VkDescriptorPoolCreateInfo dpci{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
-        dpci.maxSets = 1; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psize;
+        dpci.maxSets = 2; dpci.poolSizeCount = 1; dpci.pPoolSizes = &psize;
         VK_CHECK(vkCreateDescriptorPool(device, &dpci, nullptr, &present_pool));
-        VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
-        dsai.descriptorPool = present_pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &present_set_layout;
-        VK_CHECK(vkAllocateDescriptorSets(device, &dsai, &present_set));
-        VkDescriptorImageInfo ii{ present_sampler, geo_image_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        write.dstSet = present_set; write.dstBinding = 0; write.descriptorCount = 1; write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &ii;
-        vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        for (GeoTarget* t : { &geo_lo, &geo_hi })
+        {
+            VkDescriptorSetAllocateInfo dsai{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+            dsai.descriptorPool = present_pool; dsai.descriptorSetCount = 1; dsai.pSetLayouts = &present_set_layout;
+            VK_CHECK(vkAllocateDescriptorSets(device, &dsai, &t->present_set));
+            VkDescriptorImageInfo ii{ present_sampler, t->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
+            VkWriteDescriptorSet write{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            write.dstSet = t->present_set; write.dstBinding = 0; write.descriptorCount = 1; write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; write.pImageInfo = &ii;
+            vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+        }
 
         VkShaderModule vmod, fmod;
         if (!create_shader_module("assets/shaders/generated/TexturedQuad.vertexMain.spv", vmod)) return false;
@@ -1399,14 +1434,24 @@ namespace Donut
         glm::vec3 right = glm::normalize(glm::cross(fwd, glm::vec3(0, 1, 0)));
         cam_data.pos = pos; cam_data.right = right; cam_data.up = glm::cross(right, fwd); cam_data.fwd = fwd;
         cam_data.tan_half_fov = (float)tan(glm::radians(60.0f * 0.5f));
-        cam_data.aspect = (float)GEO_W / (float)GEO_H;
+        cam_data.aspect = (float)GEO_HI_W / (float)GEO_HI_H;  // 16:9, same for both targets
         cam_data.moving = user_moving ? 1u : 0u;
         if (cam_mapped) memcpy(cam_mapped, &cam_data, sizeof(cam_data));
 
-        // Fewer integration steps while the camera moves keeps dragging responsive;
-        // more steps once it settles renders the disk in full.
+        // Integration budget drives how deep the geodesics are traced: too few
+        // steps and grazing rays exhaust the loop mid-lensing, so the shader
+        // paints them with the HDRI (Geodesic.slang) and the hole looks sliced
+        // off "up to a certain depth" -- and near face-on it vanishes entirely.
+        // Measured: at ~8000 steps the disk disappears at steep poses, ~15000 is
+        // needed for it to resolve, INDEPENDENT of resolution. So we DON'T drop
+        // steps while moving (that would make the hole flicker out mid-drag);
+        // responsiveness comes from the lower-res target instead (see record).
+        // Sourced from settings.toml (max_steps_static), capped GPU-safe.
+        constexpr int kStepCeil = 15000;
         struct SimUBO { int steps_moving; int steps_static; float early_exit; float time; } sim;
-        sim.steps_moving = 3500; sim.steps_static = 5000; sim.early_exit = 5e12f;
+        sim.steps_static = std::clamp(SettingsManager::get_max_steps_static(), 1000, kStepCeil);
+        sim.steps_moving = sim.steps_static;  // same budget both frames; resolution is the lever
+        sim.early_exit   = SettingsManager::get_early_exit_distance();
         sim.time = (float)(glfwGetTime() - start_time);
         if (sim_mapped) memcpy(sim_mapped, &sim, sizeof(sim));
     }
@@ -1529,11 +1574,14 @@ namespace Donut
         VkBuffer ubos[4] = { cam_buf, disk_buf, obj_buf, sim_buf };
         VkDeviceMemory umem[4] = { cam_mem, disk_mem, obj_mem, sim_mem };
         for (int i = 0; i < 4; ++i) { if (ubos[i]) vkDestroyBuffer(device, ubos[i], nullptr); if (umem[i]) vkFreeMemory(device, umem[i], nullptr); }
-        if (geo_framebuffer) vkDestroyFramebuffer(device, geo_framebuffer, nullptr);
+        for (GeoTarget* t : { &geo_lo, &geo_hi })
+        {
+            if (t->fb)    vkDestroyFramebuffer(device, t->fb, nullptr);
+            if (t->view)  vkDestroyImageView(device, t->view, nullptr);
+            if (t->image) vkDestroyImage(device, t->image, nullptr);
+            if (t->mem)   vkFreeMemory(device, t->mem, nullptr);
+        }
         if (geo_render_pass) vkDestroyRenderPass(device, geo_render_pass, nullptr);
-        if (geo_image_view) vkDestroyImageView(device, geo_image_view, nullptr);
-        if (geo_image) vkDestroyImage(device, geo_image, nullptr);
-        if (geo_image_mem) vkFreeMemory(device, geo_image_mem, nullptr);
     }
 
     auto VulkanRenderer::Impl::record_command_buffer(VkCommandBuffer cmd, uint32_t image_index, const glm::vec4& clear, ImDrawData* draw_data) -> bool
@@ -1589,14 +1637,20 @@ namespace Donut
             return true;
         }
 
-        // Geodesic offscreen pass
+        // Geodesic offscreen pass. Progressive resolution: low-res while the
+        // camera moves (4x fewer pixels -> responsive), high-res once it settles
+        // (resolves the photon ring). Step count is the same for both (the disk
+        // vanishes below ~15000 steps at steep poses), so resolution is the lever.
+        GeoTarget& gt = user_moving ? geo_lo : geo_hi;
         VkClearValue geo_clear{}; geo_clear.color = { { 0, 0, 0, 1 } };
         VkRenderPassBeginInfo grp{ VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO };
-        grp.renderPass = geo_render_pass; grp.framebuffer = geo_framebuffer;
-        grp.renderArea = { { 0, 0 }, { GEO_W, GEO_H } };
+        grp.renderPass = geo_render_pass; grp.framebuffer = gt.fb;
+        grp.renderArea = { { 0, 0 }, { gt.w, gt.h } };
         grp.clearValueCount = 1; grp.pClearValues = &geo_clear;
         vkCmdBeginRenderPass(cmd, &grp, VK_SUBPASS_CONTENTS_INLINE);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geo_pipeline);
+        VkViewport gvp{ 0, 0, (float)gt.w, (float)gt.h, 0, 1 }; VkRect2D gsc{ { 0, 0 }, { gt.w, gt.h } };
+        vkCmdSetViewport(cmd, 0, 1, &gvp); vkCmdSetScissor(cmd, 0, 1, &gsc);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, geo_pipeline_layout, 0, 1, &geo_set, 0, nullptr);
         VkDeviceSize off = 0; vkCmdBindVertexBuffers(cmd, 0, 1, &quad_vb, &off);
         vkCmdDraw(cmd, 6, 1, 0, 0);
@@ -1618,7 +1672,7 @@ namespace Donut
         VkRect2D scissor{ { 0, 0 }, swapchain_extent };
         vkCmdSetViewport(cmd, 0, 1, &vp);
         vkCmdSetScissor(cmd, 0, 1, &scissor);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_layout, 0, 1, &present_set, 0, nullptr);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, present_pipeline_layout, 0, 1, &gt.present_set, 0, nullptr);
         vkCmdBindVertexBuffers(cmd, 0, 1, &quad_vb, &off);
         vkCmdDraw(cmd, 6, 1, 0, 0);
         if (draw_data)

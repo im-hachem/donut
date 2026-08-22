@@ -25,11 +25,11 @@ ConstantBuffer<Camera> cam;
 
 struct Disk
 {
-    float disk_r1;
-    float disk_r2;
-    float disk_num;
-    float thickness;
-    float disk_density;
+    float disk_r1;      // inner edge (clamped to the ISCO, 3 r_s, below)
+    float disk_r2;      // outer edge
+    float disk_num;     // turbulence strength (0 = smooth physical disk)
+    float thickness;    // unused by the thin-disk model; kept for UBO layout
+    float disk_density; // overall disk brightness / exposure
 };
 ConstantBuffer<Disk> disk;
 
@@ -53,16 +53,28 @@ ConstantBuffer<Simulation> sim;
 
 SamplerCube u_HDRIEnvironment;
 
+// Schwarzschild radius of Sgr A* (metres). Geometric units with c = G = 1 are
+// used throughout the geodesic integration; the black-hole mass is M = r_s / 2.
 static const float SagA_rs   = 1.269e10;
 static const float D_LAMBDA  = 1e7;
 static const float ESCAPE_R  = 1e30;
+
+static const float R_ISCO     = 3.0 * SagA_rs;   // innermost stable circular orbit (6M)
+static const float R_PHOTON   = 1.5 * SagA_rs;   // photon sphere (3M)
+static const float FLUX_PEAK  = 0.0569;          // peak of the r^-3(1-sqrt(r_in/r)) profile (at r/r_in ~ 1.36)
 
 static const int   DEFAULT_MAX_STEPS_MOVING    = 12000;
 static const int   DEFAULT_MAX_STEPS_STATIC    = 8000;
 static const float DEFAULT_EARLY_EXIT_DISTANCE = 2e12;
 
 static const float MIN_STEP_SIZE = 1e6;
-static const float MAX_STEP_SIZE = 5e7;
+static const float MAX_STEP_SIZE = 2e10;
+
+// Display mapping for the (relative) Novikov-Thorne flux -> visible colour.
+// The RADIAL PROFILE is physical; the absolute temperature scale is a display
+// choice (a real Sgr A* disk is far cooler / redder than this).
+static const float T_PEAK        = 4800.0;   // Kelvin at the flux peak (display scale)
+static const float DISK_EXPOSURE = 0.9;      // overall brightness of the disk
 
 struct Hit
 {
@@ -76,21 +88,6 @@ float3 SampleHDRI(float3 direction)
     return u_HDRIEnvironment.Sample(direction).rgb;
 }
 
-float hash(float p)
-{
-    p = frac(p * 0.1031);
-    p *= p + 33.33;
-    p *= p + p;
-    return frac(p);
-}
-
-float hash(float2 p)
-{
-    float3 p3 = frac(float3(p.xyx) * float3(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yzx + 33.33);
-    return frac((p3.x + p3.y) * p3.z);
-}
-
 float hash(float3 p)
 {
     p = frac(p * float3(0.1031, 0.1030, 0.0973));
@@ -102,7 +99,6 @@ float noise(float3 x)
 {
     float3 i  = floor(x);
     float3 fr = frac(x);
-
     float3 u = fr * fr * (3.0 - 2.0 * fr);
 
     float a = hash(i);
@@ -122,62 +118,92 @@ float fbm(float3 x, int octaves)
 {
     float v = 0.0;
     float a = 0.5;
-    float f = 1.0;
     float3 shift = float3(100, 200, 300);
-
     for (int i = 0; i < octaves; ++i)
     {
-        v += a * noise(x * f);
+        v += a * noise(x);
         x = x * 2.0 + shift;
         a *= 0.5;
-        f *= 2.0;
     }
     return v;
 }
 
-float GetCloudDensity(float3 pos)
+// Planckian-locus blackbody colour (Tanner Helland approximation), T in Kelvin.
+// Returns an sRGB-ish chromaticity normalised so the brightest channel ~ 1.
+float3 Blackbody(float T)
 {
-    float r_cyl  = length(float2(pos.x, pos.z));
-    float r_norm = (r_cyl - disk.disk_r1) / (disk.disk_r2 - disk.disk_r1);
+    T = clamp(T, 1000.0, 40000.0);
+    float t = T / 100.0;
+    float3 c;
 
-    if (r_norm < 0.0 || r_norm > 1.0)
-        return 0.0;
+    c.r = (t <= 66.0) ? 1.0
+                      : clamp(1.292936186 * pow(t - 60.0, -0.1332047592), 0.0, 1.0);
 
-    float h_norm = abs(pos.y) / disk.thickness;
-    float vertical_falloff = exp(-h_norm * h_norm * 3.0);
-    float radial_density = 1.0 - r_norm * 0.5;
+    c.g = (t <= 66.0) ? clamp(0.3900815788 * log(t) - 0.6318414438, 0.0, 1.0)
+                      : clamp(1.1298908609 * pow(t - 60.0, -0.0755148492), 0.0, 1.0);
 
-    float keplerian_speed = 1.0 / sqrt(r_norm + 0.1);
+    c.b = (t >= 66.0) ? 1.0
+        : (t <= 19.0) ? 0.0
+                      : clamp(0.5432067891 * log(t - 10.0) - 1.1962540891, 0.0, 1.0);
+    return c;
+}
 
-    float rotation_angle = sim.time * keplerian_speed * 0.5;
-    float3 rotated_pos = float3(
-        pos.x * cos(rotation_angle) - pos.z * sin(rotation_angle),
-        pos.y,
-        pos.x * sin(rotation_angle) + pos.z * cos(rotation_angle)
-    ) * 1e-10;
+// Emission from the thin accretion disk at an equatorial crossing point P, seen
+// along the (backward-traced) ray direction rayDir. Combines a Novikov-Thorne
+// temperature profile with the full gravitational + Doppler redshift.
+//   g = sqrt(1 - 3M/r) / (1 - beta . nhat)      (verified: g -> sqrt(1/2) at ISCO)
+// Brightness follows relativistic beaming (I_obs = g^4 I_emit); colour follows
+// the redshifted blackbody at T_obs = g * T_emit.
+float3 DiskEmission(float3 P, float3 rayDir)
+{
+    float rc   = length(float2(P.x, P.z));   // cylindrical radius (disk axis = +Y)
+    float rin  = max(disk.disk_r1, R_ISCO);
+    float rout = disk.disk_r2;
+    if (rc < rin || rc > rout)
+        return float3(0.0);
 
-    float large_turbulence = fbm(rotated_pos * 1.2, 5);
-    float medium_wisps     = fbm(rotated_pos * 2.5, 4);
-    float small_detail     = fbm(rotated_pos * 6.0, 3);
-    float fine_detail      = fbm(rotated_pos * 10.0, 2);
+    // Novikov-Thorne-style radial flux: F(r) ~ r^-3 (1 - sqrt(r_in/r)), zero at
+    // the inner edge, peaking just outside it, then declining. T ~ F^(1/4).
+    float xr   = rc / rin;
+    float flux = max((1.0 - sqrt(1.0 / xr)) / (xr * xr * xr), 0.0);
+    float Tn   = pow(flux / FLUX_PEAK, 0.25);            // normalised temperature, peak ~ 1
+    float Temit = T_PEAK * Tn;
 
-    float noise_mask = large_turbulence * 0.4 +
-                       medium_wisps * 0.3 +
-                       small_detail * 0.2 +
-                       fine_detail * 0.1;
+    // Keplerian orbit (prograde about +Y). Locally-measured orbital speed for a
+    // Schwarzschild circular geodesic: v = sqrt( M / (r - 2M) ) = 0.5 c at ISCO.
+    float3 rhat   = normalize(float3(P.x, 0.0, P.z));
+    float3 phiHat = normalize(cross(float3(0.0, 1.0, 0.0), rhat));
+    float  v      = sqrt((SagA_rs * 0.5) / max(rc - SagA_rs, 1.0));
+    float3 beta   = v * phiHat;
+    float3 nhat   = -normalize(rayDir);                  // photon direction toward the observer
 
-    noise_mask = smoothstep(0.25, 0.75, noise_mask);
+    float g = sqrt(max(1.0 - 1.5 * SagA_rs / rc, 0.0)) / max(1.0 - dot(beta, nhat), 1e-3);
 
-    float angle = atan2(pos.z, pos.x);
-    float rotated_angle = angle + sim.time * 0.5;
+    float  Tobs   = g * Temit;
+    float3 colour = Blackbody(Tobs);
+    // Physical bolometric intensity is ~ T_emit^4 * g^4, an enormous dynamic
+    // range. The g^4 relativistic beaming (the physical asymmetry) is kept; the
+    // radial falloff is display-compressed (Tn^2) so the colour gradient across
+    // the disk stays visible instead of collapsing to a thin saturated ring.
+    float  bright = pow(Tn, 2.0) * pow(g, 4.0);
 
-    float spiral_arms = sin(rotated_angle * 3.0 + r_norm * 15.0) * 0.15 + 0.85;
+    // Soft inner/outer edges (disks have no hard rim); also tames rim aliasing.
+    float edge = smoothstep(rin, rin * 1.12, rc) * (1.0 - smoothstep(rout * 0.88, rout, rc));
+    bright *= edge;
 
-    float orbital_angle = angle + sim.time * keplerian_speed * 0.8;
-    float orbital_pattern = sin(orbital_angle * 2.0 + r_norm * 8.0) * 0.2 + 0.8;
+    // Optional turbulence overlay (disk.disk_num = strength; 0 = smooth).
+    if (disk.disk_num > 0.0)
+    {
+        float ang = sim.time * 0.3 / sqrt(xr);
+        float3 rp = float3(P.x * cos(ang) - P.z * sin(ang),
+                           0.0,
+                           P.x * sin(ang) + P.z * cos(ang)) * 1e-10;
+        float turb = 1.0 + disk.disk_num * (fbm(rp * 3.0, 3) - 0.5);
+        bright *= max(turb, 0.0);
+    }
 
-    float density = vertical_falloff * radial_density * noise_mask * spiral_arms * orbital_pattern;
-    return density * disk.disk_density;
+    float exposure = DISK_EXPOSURE * max(disk.disk_density, 0.0) * 10.0;
+    return colour * bright * exposure;
 }
 
 struct Ray
@@ -198,18 +224,14 @@ Ray InitRay(float3 pos, float3 dir)
     ray.theta = acos(pos.z / ray.r);
     ray.phi   = atan2(pos.y, pos.x);
 
-    float dx = dir.x;
-    float dy = dir.y;
-    float dz = dir.z;
+    float dx = dir.x, dy = dir.y, dz = dir.z;
 
     ray.dr     = sin(ray.theta)*cos(ray.phi)*dx +
                  sin(ray.theta)*sin(ray.phi)*dy +
                  cos(ray.theta)*dz;
-
     ray.dtheta = (cos(ray.theta)*cos(ray.phi)*dx +
                   cos(ray.theta)*sin(ray.phi)*dy -
                   sin(ray.theta)*dz) / ray.r;
-
     ray.dphi   = (-sin(ray.phi)*dx + cos(ray.phi)*dy) /
                  (ray.r * sin(ray.theta));
 
@@ -217,31 +239,22 @@ Ray InitRay(float3 pos, float3 dir)
     float f = 1.0 - SagA_rs / ray.r;
     float dt_dL = sqrt((ray.dr*ray.dr)/f +
                        ray.r*ray.r*(ray.dtheta*ray.dtheta +
-                       sin(ray.theta)*sin(ray.theta)*
-                       ray.dphi*ray.dphi));
+                       sin(ray.theta)*sin(ray.theta)*ray.dphi*ray.dphi));
     ray.E = f * dt_dL;
-
     return ray;
 }
 
-bool Intercept(Ray ray, float rs)
-{
-    return ray.r <= rs;
-}
+bool Intercept(Ray ray, float rs) { return ray.r <= rs; }
 
 bool InterceptObject(Ray ray, inout Hit hit)
 {
     float3 P = float3(ray.x, ray.y, ray.z);
-
     for (int i = 0; i < obj.numObjects; ++i)
     {
         float3 center = obj.objPosRadius[i].xyz;
         float  radius = obj.objPosRadius[i].w;
-
         float distSq = dot(P - center, P - center);
-        if (distSq > radius * radius * 4.0)
-            continue;
-
+        if (distSq > radius * radius * 4.0) continue;
         if (distSq <= radius * radius)
         {
             hit.objectColor = obj.objColor[i];
@@ -250,7 +263,6 @@ bool InterceptObject(Ray ray, inout Hit hit)
             return true;
         }
     }
-
     return false;
 }
 
@@ -276,7 +288,6 @@ void RK4Step(inout Ray ray, float dL)
 {
     float3 k1a, k1b;
     GeodesicRHS(ray, k1a, k1b);
-
     ray.r      += dL * k1a.x;
     ray.theta  += dL * k1a.y;
     ray.phi    += dL * k1a.z;
@@ -289,71 +300,19 @@ void RK4Step(inout Ray ray, float dL)
     ray.z = ray.r * cos(ray.theta);
 }
 
-bool IsInDiskVolume(float3 pos)
-{
-    float r_cyl = length(float2(pos.x, pos.z));
-    return (r_cyl >= disk.disk_r1 && r_cyl <= disk.disk_r2 && abs(pos.y) <= disk.thickness);
-}
-
-float4 SampleDiskColor(float3 pos)
-{
-    float r_cyl  = length(float2(pos.x, pos.z));
-    float r_norm = (r_cyl - disk.disk_r1) / (disk.disk_r2 - disk.disk_r1);
-
-    float3 innerColor = float3(1.0, 0.9, 0.5);
-    float3 midColor   = float3(1.0, 0.6, 0.2);
-    float3 outerColor = float3(0.9, 0.3, 0.1);
-
-    float3 baseColor;
-    if (r_norm < 0.5)
-        baseColor = lerp(innerColor, midColor, r_norm * 2.0);
-    else
-        baseColor = lerp(midColor, outerColor, (r_norm - 0.5) * 2.0);
-
-    float r_norm_rot = (r_cyl - disk.disk_r1) / (disk.disk_r2 - disk.disk_r1);
-    float keplerian_speed = 1.0 / sqrt(r_norm_rot + 0.1);
-
-    float color_rotation_angle = sim.time * keplerian_speed * 0.3;
-    float3 rotated_color_pos = float3(
-        pos.x * cos(color_rotation_angle) - pos.z * sin(color_rotation_angle),
-        pos.y,
-        pos.x * sin(color_rotation_angle) + pos.z * cos(color_rotation_angle)
-    ) * 1e-10;
-
-    float large_color  = fbm(rotated_color_pos * 1.8, 4);
-    float medium_color = fbm(rotated_color_pos * 4.0, 3);
-    float small_color  = fbm(rotated_color_pos * 8.0, 2);
-    float colorVariation = (large_color * 0.5 + medium_color * 0.3 + small_color * 0.2) * 0.6;
-    baseColor = baseColor * (1.0 + colorVariation);
-
-    float density = GetCloudDensity(pos);
-
-    float brightness_rotation_angle = sim.time * keplerian_speed * 0.7;
-    float3 rotated_brightness_pos = float3(
-        pos.x * cos(brightness_rotation_angle) - pos.z * sin(brightness_rotation_angle),
-        pos.y,
-        pos.x * sin(brightness_rotation_angle) + pos.z * cos(brightness_rotation_angle)
-    ) * 1e-10;
-
-    float brightness_large  = fbm(rotated_brightness_pos * 3.0, 3);
-    float brightness_medium = fbm(rotated_brightness_pos * 5.0, 2);
-    float brightness_small  = fbm(rotated_brightness_pos * 7.0, 2);
-    float brightness_noise  = (brightness_large * 0.6 + brightness_medium * 0.3 + brightness_small * 0.1);
-
-    float baseBrightness = 1.0 + density * 1.5;
-    float glowBrightness = brightness_noise * 0.8;
-    float brightness = baseBrightness + glowBrightness;
-
-    return float4(baseColor * brightness, density);
-}
-
 float CalculateAdaptiveStepSize(Ray ray, float baseStepSize)
 {
-    float r_factor         = clamp(ray.r / (SagA_rs * 10.0), 0.1, 1.0);
-    float curvature        = length(float3(ray.dr, ray.dtheta * ray.r, ray.dphi * ray.r * sin(ray.theta)));
-    float curvature_factor = clamp(1e12 / (curvature + 1e6), 0.1, 2.0);
+    // Step proportional to the distance from the photon sphere: near-flat space
+    // far from the hole is crossed in a few huge steps, while the sharply curved
+    // region near the photon sphere is resolved with tiny ones. This keeps the
+    // integration accurate near the hole regardless of how far the camera is.
+    float step = 0.02 * max(ray.r - R_PHOTON, 0.0);
+    return clamp(step, MIN_STEP_SIZE, MAX_STEP_SIZE);
+}
 
-    return clamp(baseStepSize * r_factor * curvature_factor, MIN_STEP_SIZE, MAX_STEP_SIZE);
+float3 ACESFilm(float3 x)
+{
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
 [shader("fragment")]
@@ -364,127 +323,79 @@ float4 fragmentMain(VSOutput input) : SV_Target
     float3 dir = normalize(u * cam.camRight - v * cam.camUp + cam.camForward);
     Ray ray = InitRay(cam.camPos, dir);
 
-    float4 color = float4(0.0, 0.0, 0.0, 0.0);
-
-    bool hitBlackHole = false;
-    bool hitObject    = false;
-
-    Hit hit;
-    hit.objectColor = float4(0.0, 0.0, 0.0, 0.0);
-    hit.hitCenter   = float3(0.0, 0.0, 0.0);
+    bool  hitBlackHole = false;
+    bool  hitObject    = false;
+    Hit   hit;
+    hit.objectColor = float4(0.0);
+    hit.hitCenter   = float3(0.0);
     hit.hitRadius   = 0.0;
 
-    float4 accumulatedColor = float4(0.0, 0.0, 0.0, 0.0);
-    float  transmittance = 1.0;
+    bool   hitDisk   = false;
+    float3 diskColor = float3(0.0);   // emission of the first (opaque) disk surface hit
 
     int maxSteps = cam.moving ? sim.maxStepsMoving : sim.maxStepsStatic;
-
     if (maxSteps <= 0)
         maxSteps = cam.moving ? DEFAULT_MAX_STEPS_MOVING : DEFAULT_MAX_STEPS_STATIC;
 
-    float cameraDistance = length(cam.camPos);
-    if (cameraDistance > 2e12)
-        maxSteps = maxSteps / 2;
-    else if (cameraDistance > 1e12)
-        maxSteps = int(maxSteps * 0.75);
-
-    float initialEscapeVelocity = sqrt(2.0 * SagA_rs / ray.r);
-    if (ray.dr > initialEscapeVelocity * 0.95 &&
-        ray.r  > SagA_rs * 200.0)
-        maxSteps = maxSteps / 2;
-
-    float lambda = 0.0;
-    int objectCheckInterval = 5;
+    float exitDistance = sim.earlyExitDistance > 0.0 ? sim.earlyExitDistance : DEFAULT_EARLY_EXIT_DISTANCE;
+    int   objectCheckInterval = 5;
 
     for (int i = 0; i < maxSteps; ++i)
     {
-        float exitDistance = sim.earlyExitDistance > 0.0 ? sim.earlyExitDistance : DEFAULT_EARLY_EXIT_DISTANCE;
-        if (ray.r > exitDistance)
-            break;
-        if (ray.r > ESCAPE_R)
-            break;
+        if (Intercept(ray, SagA_rs)) { hitBlackHole = true; break; }
+        if (ray.r > exitDistance || ray.r > ESCAPE_R) break;
 
-        if (Intercept(ray, SagA_rs))
-        {
-            hitBlackHole = true;
-            break;
-        }
-
-        float currentStepSize = CalculateAdaptiveStepSize(ray, D_LAMBDA);
-
-        RK4Step(ray, currentStepSize);
-        lambda += currentStepSize;
-
+        float3 prevPos = float3(ray.x, ray.y, ray.z);
+        float  stepSize = CalculateAdaptiveStepSize(ray, D_LAMBDA);
+        RK4Step(ray, stepSize);
         float3 newPos = float3(ray.x, ray.y, ray.z);
 
-        if (IsInDiskVolume(newPos))
+        // Opaque thin disk: a sign change in y means the ray pierced the disk
+        // plane (y = 0). The first crossing inside the annulus is a solid,
+        // self-luminous surface -- it emits and blocks everything behind it, so
+        // the ray stops here (near side occludes far side / background).
+        if (prevPos.y * newPos.y < 0.0)
         {
-            float4 diskSample = SampleDiskColor(newPos);
-            float  density    = diskSample.a;
-            float3 diskColor  = diskSample.rgb;
-
-            float stepLength = currentStepSize * 1e-8;
-
-            float absorption = density * stepLength * 0.8;
-            float scattering = density * stepLength * 1.5;
-            float extinction = absorption + scattering;
-
-            float stepTransmittance = exp(-extinction);
-
-            float3 emission = diskColor * density * stepLength * 4.0 * sqrt(disk.disk_density);
-
-            float3 glowColor       = lerp(diskColor, float3(1.0, 0.8, 0.6), 0.3);
-            float  glowIntensity   = density * stepLength * 2.0;
-            float3 atmosphericGlow = glowColor * glowIntensity * 0.8;
-
-            float3 totalEmission = emission + atmosphericGlow;
-            accumulatedColor.rgb += totalEmission * transmittance;
-
-            transmittance *= stepTransmittance;
-
-            if (transmittance < 0.01)
+            float  t     = prevPos.y / (prevPos.y - newPos.y);
+            float3 cross = lerp(prevPos, newPos, t);
+            float  rc    = length(float2(cross.x, cross.z));
+            if (rc >= max(disk.disk_r1, R_ISCO) && rc <= disk.disk_r2)
             {
-                accumulatedColor.a = 1.0 - transmittance;
+                diskColor = DiskEmission(cross, newPos - prevPos);
+                hitDisk   = true;
                 break;
             }
         }
 
-        if (i % objectCheckInterval == 0 && InterceptObject(ray, hit))
-        {
-            hitObject = true;
-            break;
-        }
+        if (i % objectCheckInterval == 0 && InterceptObject(ray, hit)) { hitObject = true; break; }
 
-        if (ray.dr > 0.0 && ray.r > SagA_rs * 100.0 && lambda > 2e8)
-            break;
+        // Principled escape: once outbound in near-flat spacetime (r >> r_s) the
+        // ray direction no longer changes, so stop and read the background.
+        if (ray.dr > 0.0 && ray.r > 50.0 * SagA_rs) break;
     }
 
-    accumulatedColor.a = 1.0 - transmittance;
-
-    if (hitBlackHole)
+    float3 shade;
+    if (hitDisk)
     {
-        color = float4(0.0, 0.0, 0.0, 1.0);
+        shade = diskColor;                    // opaque, self-luminous disk surface
+    }
+    else if (hitBlackHole)
+    {
+        shade = float3(0.0);                  // event-horizon shadow
     }
     else if (hitObject)
     {
         float3 P = float3(ray.x, ray.y, ray.z);
         float3 N = normalize(P - hit.hitCenter);
         float3 V = normalize(cam.camPos - P);
-
-        float ambient   = 0.1;
-        float diff      = max(dot(N, V), 0.0);
-        float intensity = ambient + (1.0 - ambient) * diff;
-        float3 shaded   = hit.objectColor.rgb * intensity;
-
-        color = float4(shaded, hit.objectColor.a);
-        color = lerp(accumulatedColor, color, color.a);
+        float  intensity = 0.1 + 0.9 * max(dot(N, V), 0.0);
+        shade = hit.objectColor.rgb * intensity;
     }
     else
     {
-        float3 rayDirection = normalize(float3(ray.x, ray.y, ray.z) - cam.camPos);
-        float3 hdriColor = SampleHDRI(rayDirection);
-        color = float4(lerp(accumulatedColor.rgb, hdriColor, 1.0 - accumulatedColor.a), 1.0);
+        float3 rayDir = normalize(float3(ray.x, ray.y, ray.z) - cam.camPos);
+        shade = SampleHDRI(rayDir);
     }
 
-    return color;
+    return float4(ACESFilm(shade), 1.0);
 }
