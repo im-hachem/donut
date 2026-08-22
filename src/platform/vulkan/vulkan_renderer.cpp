@@ -761,13 +761,17 @@ namespace Donut
         const VkMemoryPropertyFlags host_vis = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
         const uint32_t FACE = 1024;
         const VkFormat cube_fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+        uint32_t CUBE_MIPS = 1; for (uint32_t s = FACE; s > 1; s >>= 1) ++CUBE_MIPS;  // full chain (11 for 1024)
 
         VkImageCreateInfo cci{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
         cci.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         cci.imageType = VK_IMAGE_TYPE_2D; cci.format = cube_fmt; cci.extent = { FACE, FACE, 1 };
-        cci.mipLevels = 1; cci.arrayLayers = 6; cci.samples = VK_SAMPLE_COUNT_1_BIT;
+        cci.mipLevels = CUBE_MIPS; cci.arrayLayers = 6; cci.samples = VK_SAMPLE_COUNT_1_BIT;
         cci.tiling = VK_IMAGE_TILING_OPTIMAL;
-        cci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // COLOR_ATTACHMENT renders the 6 faces (mip 0); TRANSFER_SRC/DST build the
+        // mip chain by blitting; SAMPLED for shader reads (incl. mip-LOD sampling).
+        cci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                  | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
         VK_CHECK(vkCreateImage(device, &cci, nullptr, &cube_image));
         VkMemoryRequirements creq{}; vkGetImageMemoryRequirements(device, cube_image, &creq);
         VkMemoryAllocateInfo cai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
@@ -776,10 +780,11 @@ namespace Donut
         VK_CHECK(vkBindImageMemory(device, cube_image, cube_mem, 0));
         VkImageViewCreateInfo cvci{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
         cvci.image = cube_image; cvci.viewType = VK_IMAGE_VIEW_TYPE_CUBE; cvci.format = cube_fmt;
-        cvci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+        cvci.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, CUBE_MIPS, 0, 6 };
         VK_CHECK(vkCreateImageView(device, &cvci, nullptr, &cube_view));
         VkSamplerCreateInfo csm{ VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO };
         csm.magFilter = VK_FILTER_LINEAR; csm.minFilter = VK_FILTER_LINEAR;
+        csm.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR; csm.minLod = 0.0f; csm.maxLod = (float)CUBE_MIPS;
         csm.addressModeU = csm.addressModeV = csm.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         VK_CHECK(vkCreateSampler(device, &csm, nullptr, &cube_sampler));
 
@@ -984,6 +989,47 @@ namespace Donut
             vkCmdDraw(cmd, 36, 1, 0, 0);
             vkCmdEndRenderPass(cmd);
         }
+
+        // Build the mip chain (all 6 faces) by successive linear down-blits, so
+        // divergence-based LOD sampling can read a blurred sky for lensed rays.
+        // Mip 0 (every layer) is SHADER_READ_ONLY from the render passes above.
+        {
+            VkImageMemoryBarrier src0{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            src0.image = cube_image; src0.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 6 };
+            src0.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; src0.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            src0.srcAccessMask = VK_ACCESS_SHADER_READ_BIT; src0.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &src0);
+
+            int32_t mipW = (int32_t)FACE, mipH = (int32_t)FACE;
+            for (uint32_t m = 1; m < CUBE_MIPS; ++m)
+            {
+                int32_t nW = mipW > 1 ? mipW / 2 : 1, nH = mipH > 1 ? mipH / 2 : 1;
+                VkImageMemoryBarrier bd{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                bd.image = cube_image; bd.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, m, 1, 0, 6 };
+                bd.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; bd.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                bd.srcAccessMask = 0; bd.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bd);
+
+                VkImageBlit blit{};
+                blit.srcOffsets[1] = { mipW, mipH, 1 }; blit.srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m - 1, 0, 6 };
+                blit.dstOffsets[1] = { nW, nH, 1 };     blit.dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, m, 0, 6 };
+                vkCmdBlitImage(cmd, cube_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    cube_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+
+                VkImageMemoryBarrier bs{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+                bs.image = cube_image; bs.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, m, 1, 0, 6 };
+                bs.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; bs.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                bs.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; bs.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &bs);
+                mipW = nW; mipH = nH;
+            }
+            VkImageMemoryBarrier fin{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+            fin.image = cube_image; fin.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, CUBE_MIPS, 0, 6 };
+            fin.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; fin.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            fin.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT; fin.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &fin);
+        }
+
         VK_CHECK(vkEndCommandBuffer(cmd));
         VkSubmitInfo si{ VK_STRUCTURE_TYPE_SUBMIT_INFO }; si.commandBufferCount = 1; si.pCommandBuffers = &cmd;
         VK_CHECK(vkQueueSubmit(graphics_queue, 1, &si, VK_NULL_HANDLE));

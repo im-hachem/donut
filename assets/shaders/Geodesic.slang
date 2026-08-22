@@ -83,11 +83,6 @@ struct Hit
     float  hitRadius;
 };
 
-float3 SampleHDRI(float3 direction)
-{
-    return u_HDRIEnvironment.Sample(direction).rgb;
-}
-
 float hash(float3 p)
 {
     p = frac(p * float3(0.1031, 0.1030, 0.0973));
@@ -307,6 +302,13 @@ float CalculateAdaptiveStepSize(Ray ray, float baseStepSize)
     // region near the photon sphere is resolved with tiny ones. This keeps the
     // integration accurate near the hole regardless of how far the camera is.
     float step = 0.02 * max(ray.r - R_PHOTON, 0.0);
+
+    // Slow down when near the disk plane (within its radial extent) so the thin
+    // slab is never stepped over -- otherwise grazing rays leak through it.
+    float rc = length(float2(ray.x, ray.z));
+    if (rc < disk.disk_r2 * 3.0 && abs(ray.y) < disk.thickness * 8.0)
+        step = min(step, disk.thickness);
+
     return clamp(step, MIN_STEP_SIZE, MAX_STEP_SIZE);
 }
 
@@ -315,11 +317,12 @@ float3 ACESFilm(float3 x)
     return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
 }
 
-[shader("fragment")]
-float4 fragmentMain(VSOutput input) : SV_Target
+// Trace one primary ray for the given image UV and return its linear,
+// pre-tone-map radiance. Called once per sub-sample by fragmentMain.
+float3 TracePixel(float2 texCoord)
 {
-    float u = (2.0 * input.texCoord.x - 1.0) * cam.aspect * cam.tanHalfFov;
-    float v = (1.0 - 2.0 * input.texCoord.y) * cam.tanHalfFov;
+    float u = (2.0 * texCoord.x - 1.0) * cam.aspect * cam.tanHalfFov;
+    float v = (1.0 - 2.0 * texCoord.y) * cam.tanHalfFov;
     float3 dir = normalize(u * cam.camRight - v * cam.camUp + cam.camForward);
     Ray ray = InitRay(cam.camPos, dir);
 
@@ -350,20 +353,26 @@ float4 fragmentMain(VSOutput input) : SV_Target
         RK4Step(ray, stepSize);
         float3 newPos = float3(ray.x, ray.y, ray.z);
 
-        // Opaque thin disk: a sign change in y means the ray pierced the disk
-        // plane (y = 0). The first crossing inside the annulus is a solid,
-        // self-luminous surface -- it emits and blocks everything behind it, so
-        // the ray stops here (near side occludes far side / background).
-        if (prevPos.y * newPos.y < 0.0)
+        // Opaque disk of small half-thickness H (a slab about the midplane y=0).
+        // The ray hits when it first crosses the midplane OR enters the slab
+        // while grazing along it. Real (nonzero) thickness stops the zero-height
+        // edge-on "razor" from aliasing into a beam streaking across the frame.
         {
-            float  t     = prevPos.y / (prevPos.y - newPos.y);
-            float3 cross = lerp(prevPos, newPos, t);
-            float  rc    = length(float2(cross.x, cross.z));
-            if (rc >= max(disk.disk_r1, R_ISCO) && rc <= disk.disk_r2)
+            float H       = disk.thickness;
+            bool  crossed = prevPos.y * newPos.y < 0.0;
+            bool  inSlab  = abs(newPos.y) <= H;
+            if (crossed || inSlab)
             {
-                diskColor = DiskEmission(cross, newPos - prevPos);
-                hitDisk   = true;
-                break;
+                float3 hitP = crossed
+                    ? lerp(prevPos, newPos, prevPos.y / (prevPos.y - newPos.y))
+                    : newPos;
+                float rc = length(float2(hitP.x, hitP.z));
+                if (rc >= max(disk.disk_r1, R_ISCO) && rc <= disk.disk_r2)
+                {
+                    diskColor = DiskEmission(hitP, newPos - prevPos);
+                    hitDisk   = true;
+                    break;
+                }
             }
         }
 
@@ -373,6 +382,14 @@ float4 fragmentMain(VSOutput input) : SV_Target
         // ray direction no longer changes, so stop and read the background.
         if (ray.dr > 0.0 && ray.r > 50.0 * SagA_rs) break;
     }
+
+    // Escape direction + environment mip LOD from the ray's angular divergence.
+    // Computed UNCONDITIONALLY (before the branch) so ddx/ddy are valid; strongly
+    // lensed background rays diverge fast, so they read a blurred cubemap mip and
+    // the starfield stops aliasing into a fan along the equatorial plane.
+    float3 rayDir    = normalize(float3(ray.x, ray.y, ray.z) - cam.camPos);
+    float  footprint = max(length(ddx(rayDir)), length(ddy(rayDir)));
+    float  envLod    = clamp(log2(max(footprint / 0.0015, 1.0)), 0.0, 10.0);
 
     float3 shade;
     if (hitDisk)
@@ -393,9 +410,31 @@ float4 fragmentMain(VSOutput input) : SV_Target
     }
     else
     {
-        float3 rayDir = normalize(float3(ray.x, ray.y, ray.z) - cam.camPos);
-        shade = SampleHDRI(rayDir);
+        shade = u_HDRIEnvironment.SampleLevel(rayDir, envLod).rgb;
     }
 
-    return float4(ACESFilm(shade), 1.0);
+    return shade;
+}
+
+[shader("fragment")]
+float4 fragmentMain(VSOutput input) : SV_Target
+{
+    // Moving frame: one sample for responsiveness. Settled frame: rotated-grid
+    // 4x supersampling (the 4-rook pattern gives 4 distinct sub-pixel positions
+    // on BOTH axes, far better on the near-horizontal lensed edges than an
+    // ordered grid). Radiance is averaged before tone-mapping; ddx/ddy give the
+    // resolution-correct per-pixel UV footprint.
+    if (cam.moving)
+        return float4(ACESFilm(TracePixel(input.texCoord)), 1.0);
+
+    float2 dUV = float2(ddx(input.texCoord.x), ddy(input.texCoord.y));
+    float2 offs[4] = {
+        float2( 0.125,  0.375), float2( 0.375, -0.125),
+        float2(-0.125, -0.375), float2(-0.375,  0.125),
+    };
+    float3 sum = float3(0.0);
+    for (int i = 0; i < 4; ++i)
+        sum += TracePixel(input.texCoord + offs[i] * dUV);
+
+    return float4(ACESFilm(sum * 0.25), 1.0);
 }
